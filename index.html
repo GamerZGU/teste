@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Financeiro Automático</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="script.js" defer></script>
+  <script id="chartJsScript" src="https://cdn.jsdelivr.net/npm/chart.js" async></script>
+  <script id="lucideScript" src="https://unpkg.com/lucide@latest" async></script>
+</head>
+<body>
+  <div class="loading-overlay" id="loadingOverlay" hidden>
+    <div class="loader-card">
+      <span class="loader"></span>
+      <div>
+        <strong id="loadingTitle">Carregando dados</strong>
+        <p id="loadingText">Sincronizando com o Financeiro Automático</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Menu principal">
+      <div class="brand">
+        <div class="brand-mark">
+          <i data-lucide="bar-chart-3"></i>
+        </div>
+        <div>
+          <strong>Financeiro Automático</strong>
+          <span>Controle inteligente</span>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-link active" type="button" data-section="dashboard">
+          <i data-lucide="layout-dashboard"></i>
+          <span>Dashboard</span>
+        </button>
+        <button class="nav-link" type="button" data-section="recebidos">
+          <i data-lucide="arrow-down-left"></i>
+          <span>Pix Recebidos</span>
+        </button>
+        <button class="nav-link" type="button" data-section="realizados">
+          <i data-lucide="arrow-up-right"></i>
+          <span>Pix Realizados</span>
+        </button>
+        <button class="nav-link" type="button" data-section="historico">
+          <i data-lucide="history"></i>
+          <span>Histórico</span>
+        </button>
+        <button class="nav-link" type="button" data-section="categorias">
+          <i data-lucide="tags"></i>
+          <span>Categorias</span>
+        </button>
+        <button class="nav-link" type="button" data-section="configuracoes">
+          <i data-lucide="settings"></i>
+          <span>Configurações</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-panel">
+        <div class="status-row">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="apiStatus">Aguardando API</span>
+        </div>
+        <div class="side-metric">
+          <span>Saldo do período</span>
+          <strong id="sidebarBalance">R$ 0,00</strong>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Sistema financeiro</p>
+          <h1 id="pageTitle">Dashboard</h1>
+          <span class="page-subtitle" id="periodLabel">Sincronizando período</span>
+        </div>
+
+        <div class="topbar-actions">
+          <label class="field compact-field" for="monthSelect">
+            <i data-lucide="calendar"></i>
+            <select id="monthSelect" aria-label="Mês">
+              <option value="05">Maio</option>
+            </select>
+          </label>
+          <label class="field year-field" for="yearInput">
+            <input id="yearInput" type="number" min="2020" max="2100" step="1" value="2026" aria-label="Ano">
+          </label>
+          <button class="icon-button primary-button" id="refreshButton" type="button">
+            <i data-lucide="refresh-cw"></i>
+            <span>Atualizar</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="view active-view" id="dashboard" aria-labelledby="dashboard-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="dashboard-title">Visão geral</h2>
+            <p id="lastUpdated">Última atualização: --</p>
+          </div>
+          <span class="period-chip" id="currentPeriod">--/----</span>
+        </div>
+
+        <div class="metric-grid" id="metricGrid"></div>
+
+        <div class="dashboard-grid">
+          <article class="panel panel-large">
+            <div class="panel-header">
+              <div>
+                <h3>Receitas x Despesas</h3>
+                <p>Fluxo diário do período</p>
+              </div>
+              <i data-lucide="line-chart"></i>
+            </div>
+            <div class="chart-box large-chart">
+              <canvas id="cashflowChart"></canvas>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Movimento Pix</h3>
+                <p>Entradas e saídas recentes</p>
+              </div>
+              <i data-lucide="wallet"></i>
+            </div>
+            <div class="pix-summary">
+              <div class="summary-line success">
+                <span>Recebidos</span>
+                <strong id="receivedTotal">R$ 0,00</strong>
+                <small id="receivedCount">0 entradas</small>
+              </div>
+              <div class="summary-line danger">
+                <span>Realizados</span>
+                <strong id="sentTotal">R$ 0,00</strong>
+                <small id="sentCount">0 saídas</small>
+              </div>
+            </div>
+            <div class="mini-list" id="dashboardRecentList"></div>
+          </article>
+        </div>
+
+        <div class="dashboard-grid secondary-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Gastos por categoria</h3>
+                <p>Distribuição das saídas</p>
+              </div>
+              <i data-lucide="pie-chart"></i>
+            </div>
+            <div class="chart-box">
+              <canvas id="categoryChart"></canvas>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Evolução mensal</h3>
+                <p id="monthlyStatus">Mês selecionado</p>
+              </div>
+              <i data-lucide="trending-up"></i>
+            </div>
+            <div class="chart-box">
+              <canvas id="monthlyChart"></canvas>
+            </div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <h3>Histórico recente</h3>
+              <p>Últimas movimentações consolidadas</p>
+            </div>
+            <button class="ghost-button" type="button" data-section-shortcut="historico">
+              <span>Ver tudo</span>
+              <i data-lucide="chevron-right"></i>
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tipo</th>
+                  <th>Data</th>
+                  <th>Nome</th>
+                  <th>Categoria</th>
+                  <th class="align-right">Valor</th>
+                </tr>
+              </thead>
+              <tbody id="recentTable"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="view" id="recebidos" aria-labelledby="recebidos-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="recebidos-title">Pix Recebidos</h2>
+            <p>Entradas identificadas no período selecionado</p>
+          </div>
+          <span class="total-pill success" id="receivedPill">R$ 0,00</span>
+        </div>
+        <article class="panel">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th class="align-right">Valor</th>
+                  <th>Quem enviou</th>
+                  <th>Descrição</th>
+                </tr>
+              </thead>
+              <tbody id="receivedTable"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="view" id="realizados" aria-labelledby="realizados-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="realizados-title">Pix Realizados</h2>
+            <p>Saídas e pagamentos por categoria</p>
+          </div>
+          <span class="total-pill danger" id="sentPill">R$ 0,00</span>
+        </div>
+        <article class="panel">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th class="align-right">Valor</th>
+                  <th>Destino</th>
+                  <th>Categoria</th>
+                </tr>
+              </thead>
+              <tbody id="sentTable"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="view" id="historico" aria-labelledby="historico-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="historico-title">Histórico</h2>
+            <p id="historyCount">0 movimentações</p>
+          </div>
+        </div>
+
+        <div class="filter-bar">
+          <label class="field search-field" for="nameSearch">
+            <i data-lucide="search"></i>
+            <input id="nameSearch" type="search" placeholder="Pesquisar por nome">
+          </label>
+          <label class="field" for="categoryFilter">
+            <i data-lucide="filter"></i>
+            <select id="categoryFilter" aria-label="Categoria"></select>
+          </label>
+          <label class="field" for="typeFilter">
+            <select id="typeFilter" aria-label="Tipo">
+              <option value="all">Todos</option>
+              <option value="entrada">Entradas</option>
+              <option value="saida">Saídas</option>
+            </select>
+          </label>
+          <label class="field" for="historyMonth">
+            <select id="historyMonth" aria-label="Mês do histórico">
+              <option value="05">Maio</option>
+            </select>
+          </label>
+          <label class="field year-field" for="historyYear">
+            <input id="historyYear" type="number" min="2020" max="2100" step="1" value="2026" aria-label="Ano do histórico">
+          </label>
+        </div>
+
+        <article class="panel">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tipo</th>
+                  <th>Data</th>
+                  <th>Nome</th>
+                  <th>Categoria</th>
+                  <th class="align-right">Valor</th>
+                </tr>
+              </thead>
+              <tbody id="historyTable"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="view" id="categorias" aria-labelledby="categorias-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="categorias-title">Categorias</h2>
+            <p>Ranking de gastos do período</p>
+          </div>
+          <span class="total-pill neutral" id="categoryTotal">R$ 0,00</span>
+        </div>
+        <div class="category-grid" id="categoryList"></div>
+      </section>
+
+      <section class="view" id="configuracoes" aria-labelledby="configuracoes-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="configuracoes-title">Configurações</h2>
+            <p>Conexão e preferências do painel</p>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Conexão</h3>
+                <p id="connectionLabel">API aguardando sincronização</p>
+              </div>
+              <i data-lucide="database"></i>
+            </div>
+            <div class="setting-row">
+              <span>Endpoint</span>
+              <code id="apiEndpoint"></code>
+            </div>
+            <div class="setting-row">
+              <span>Status</span>
+              <strong id="connectionStatus">--</strong>
+            </div>
+            <div class="setting-row">
+              <span>Período ativo</span>
+              <strong id="settingsPeriod">--/----</strong>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Resumo técnico</h3>
+                <p>Dados carregados na sessão atual</p>
+              </div>
+              <i data-lucide="shield-check"></i>
+            </div>
+            <div class="setting-row">
+              <span>Entradas</span>
+              <strong id="settingsEntries">0</strong>
+            </div>
+            <div class="setting-row">
+              <span>Saídas</span>
+              <strong id="settingsExits">0</strong>
+            </div>
+            <div class="setting-row">
+              <span>Categorias</span>
+              <strong id="settingsCategories">0</strong>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="pix-modal-backdrop" id="pixDetailsModal" hidden>
+    <article class="pix-modal" role="dialog" aria-modal="true" aria-labelledby="pixDetailsTitle">
+      <button class="modal-close" id="pixDetailsClose" type="button" aria-label="Fechar detalhes">
+        <i data-lucide="x"></i>
+      </button>
+
+      <header class="pix-modal-header">
+        <div class="pix-modal-icon" id="pixDetailsIcon">
+          <i data-lucide="receipt-text"></i>
+        </div>
+        <div>
+          <span class="pix-modal-kicker" id="pixDetailsKind">Detalhes do PIX</span>
+          <h2 id="pixDetailsTitle">Transação PIX</h2>
+          <p id="pixDetailsSubtitle">Carregando informações da transação</p>
+        </div>
+        <strong class="pix-modal-amount" id="pixDetailsAmount">R$ 0,00</strong>
+      </header>
+
+      <div class="pix-modal-notice" id="pixDetailsNotice" hidden></div>
+      <div class="pix-modal-content" id="pixDetailsContent"></div>
+    </article>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
