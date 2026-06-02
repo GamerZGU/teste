@@ -4,13 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Financeiro Automático</title>
+  <meta name="theme-color" content="#06110d">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Financeiro Automático">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+  <link rel="apple-touch-icon" href="assets/icon-192.png">
   <link id="mainStylesheet" rel="stylesheet" href="style.css">
   <script src="script.js" defer></script>
   <script id="chartJsScript" src="https://cdn.jsdelivr.net/npm/chart.js" async></script>
   <script id="lucideScript" src="https://unpkg.com/lucide@latest" async></script>
-  <script id="firebaseAppScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app-compat.js" async></script>
-  <script id="firebaseAuthScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth-compat.js" async></script>
-  <script id="firebaseFirestoreScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-compat.js" async></script>
+  <script id="firebaseAppScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app-compat.js" defer></script>
+  <script id="firebaseAuthScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth-compat.js" defer></script>
+  <script id="firebaseFirestoreScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-compat.js" defer></script>
 </head>
 <body>
   <div class="loading-overlay" id="loadingOverlay" hidden>
@@ -24,6 +31,47 @@
   </div>
 
   <div class="access-gate" id="accessGate">
+    <section class="landing-card" id="accessLanding">
+      <div class="landing-copy">
+        <p class="eyebrow">Controle financeiro automático</p>
+        <h1>Controle seus Pix automaticamente pelo Gmail</h1>
+        <p>Organize entradas, saídas, metas e relatórios em um painel escuro com cara de app financeiro profissional.</p>
+        <div class="landing-actions">
+          <button class="google-button login-submit" id="landingLoginButton" type="button">
+            <i data-lucide="log-in"></i>
+            <span>Entrar</span>
+          </button>
+          <button class="ghost-button landing-invite-button" id="landingInviteButton" type="button">
+            <i data-lucide="ticket"></i>
+            <span>Tenho convite</span>
+          </button>
+        </div>
+        <div class="landing-benefits">
+          <span><i data-lucide="mail-check"></i> Leitura manual do Gmail</span>
+          <span><i data-lucide="shield-check"></i> Acesso por convite</span>
+          <span><i data-lucide="bar-chart-3"></i> Relatórios e metas</span>
+        </div>
+      </div>
+      <div class="landing-mockup" aria-hidden="true">
+        <div class="mockup-top">
+          <span></span>
+          <strong>R$ 4.200,00</strong>
+        </div>
+        <div class="mockup-grid">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+        <div class="mockup-chart">
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+        </div>
+      </div>
+    </section>
     <section class="access-card login-card" role="dialog" aria-labelledby="accessTitle" aria-modal="true">
       <div class="access-icon">
         <i data-lucide="lock-keyhole"></i>
@@ -102,6 +150,30 @@
           <i data-lucide="tags"></i>
           <span>Categorias</span>
         </button>
+        <button class="nav-link" type="button" data-section="vendas">
+          <i data-lucide="shopping-bag"></i>
+          <span>Vendas</span>
+        </button>
+        <button class="nav-link" type="button" data-section="analise">
+          <i data-lucide="brain-circuit"></i>
+          <span>Análise IA</span>
+        </button>
+        <button class="nav-link" type="button" data-section="relatorios">
+          <i data-lucide="file-bar-chart"></i>
+          <span>Relatórios</span>
+        </button>
+        <button class="nav-link" type="button" data-section="metas">
+          <i data-lucide="target"></i>
+          <span>Metas</span>
+        </button>
+        <button class="nav-link" type="button" data-section="onboarding">
+          <i data-lucide="sparkles"></i>
+          <span>Onboarding</span>
+        </button>
+        <button class="nav-link" type="button" data-section="planos">
+          <i data-lucide="badge-dollar-sign"></i>
+          <span>Planos</span>
+        </button>
         <button class="nav-link" type="button" data-section="configuracoes">
           <i data-lucide="settings"></i>
           <span>Configurações</span>
@@ -148,6 +220,11 @@
           <span>Conectar Gmail</span>
         </button>
 
+        <button class="gmail-button outlook-button" id="connectOutlookButton" type="button" hidden>
+          <i data-lucide="mail-plus"></i>
+          <span>Outlook/Hotmail Beta</span>
+        </button>
+
         <p id="authStatus">Login Google opcional</p>
       </div>
 
@@ -189,6 +266,10 @@
             <i data-lucide="refresh-cw"></i>
             <span>Atualizar</span>
           </button>
+          <button class="icon-button pwa-install-button" id="installPwaButton" type="button" hidden>
+            <i data-lucide="smartphone"></i>
+            <span>Instalar</span>
+          </button>
         </div>
       </header>
 
@@ -202,6 +283,7 @@
         </div>
 
         <div class="metric-grid" id="metricGrid"></div>
+        <div class="budget-alert-panel" id="budgetAlertPanel" hidden></div>
 
         <div class="dashboard-grid">
           <article class="panel panel-large">
@@ -410,6 +492,315 @@
         <div class="category-grid" id="categoryList"></div>
       </section>
 
+      <section class="view" id="vendas" aria-labelledby="vendas-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="vendas-title">Vendas</h2>
+            <p>Registre receitas manuais e acompanhe no dashboard</p>
+          </div>
+          <span class="total-pill success" id="salesTotalPill">R$ 0,00</span>
+        </div>
+
+        <div class="settings-grid sales-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3 id="saleFormTitle">Lançar venda</h3>
+                <p>Venda manual entra como receita do período</p>
+              </div>
+              <i data-lucide="shopping-bag"></i>
+            </div>
+            <form class="admin-form" id="saleForm">
+              <input id="saleIdInput" type="hidden">
+              <label class="login-field" for="saleClientInput">
+                <span>Cliente</span>
+                <input id="saleClientInput" type="text" placeholder="Nome do cliente" required>
+              </label>
+              <label class="login-field" for="saleProductInput">
+                <span>Produto/Serviço</span>
+                <input id="saleProductInput" type="text" placeholder="Ex: Consultoria, produto, serviço" required>
+              </label>
+              <label class="login-field" for="saleValueInput">
+                <span>Valor</span>
+                <input id="saleValueInput" type="number" min="0" step="0.01" placeholder="0,00" required>
+              </label>
+              <label class="login-field" for="salePaymentInput">
+                <span>Forma de pagamento</span>
+                <select id="salePaymentInput" required>
+                  <option value="Pix">Pix</option>
+                  <option value="Cartão">Cartão</option>
+                  <option value="Dinheiro">Dinheiro</option>
+                  <option value="Boleto">Boleto</option>
+                  <option value="Outro">Outro</option>
+                </select>
+              </label>
+              <label class="login-field" for="saleDateInput">
+                <span>Data</span>
+                <input id="saleDateInput" type="date" required>
+              </label>
+              <label class="login-field" for="saleCategoryInput">
+                <span>Categoria</span>
+                <input id="saleCategoryInput" type="text" placeholder="Ex: Serviços" required>
+              </label>
+              <label class="login-field full-field" for="saleObservationInput">
+                <span>Observação</span>
+                <textarea id="saleObservationInput" rows="3" placeholder="Detalhes opcionais"></textarea>
+              </label>
+              <div class="form-actions">
+                <button class="google-button login-submit" type="submit">
+                  <i data-lucide="save"></i>
+                  <span id="saleSubmitLabel">Salvar venda</span>
+                </button>
+                <button class="ghost-button" id="saleCancelEditButton" type="button" hidden>
+                  <i data-lucide="x"></i>
+                  <span>Cancelar edição</span>
+                </button>
+              </div>
+            </form>
+          </article>
+
+          <article class="panel sales-list-panel">
+            <div class="panel-header">
+              <div>
+                <h3>Lista de vendas</h3>
+                <p id="salesCountLabel">0 vendas registradas</p>
+              </div>
+              <label class="field compact-field admin-user-filter" for="salesUserFilter" hidden>
+                <i data-lucide="user"></i>
+                <select id="salesUserFilter" aria-label="Filtrar vendas por usuário">
+                  <option value="all">Todos usuários</option>
+                </select>
+              </label>
+            </div>
+            <div class="table-wrap">
+              <table class="sales-table">
+                <thead>
+                  <tr>
+                    <th>Data</th>
+                    <th>Cliente</th>
+                    <th>Produto/Serviço</th>
+                    <th>Categoria</th>
+                    <th class="align-right">Valor</th>
+                    <th>Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="salesTable"></tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="analise" aria-labelledby="analise-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="analise-title">Assistente Financeiro</h2>
+            <p>Análise local por regras, sem API paga</p>
+          </div>
+          <span class="total-pill neutral" id="aiSummaryPill">Análise local</span>
+        </div>
+        <div class="ai-grid" id="aiInsightsGrid"></div>
+      </section>
+
+      <section class="view" id="relatorios" aria-labelledby="relatorios-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="relatorios-title">Relatórios</h2>
+            <p>Resumo mensal consolidado para análise e exportação</p>
+          </div>
+          <button class="ghost-button" id="exportReportCsvButton" type="button">
+            <i data-lucide="download"></i>
+            <span>Exportar CSV</span>
+          </button>
+        </div>
+
+        <div class="filter-bar">
+          <label class="field" for="reportMonth">
+            <i data-lucide="calendar"></i>
+            <select id="reportMonth" aria-label="Mês do relatório"></select>
+          </label>
+          <label class="field year-field" for="reportYear">
+            <input id="reportYear" type="number" min="2020" max="2100" step="1" value="2026" aria-label="Ano do relatório">
+          </label>
+        </div>
+
+        <div class="metric-grid report-metrics">
+          <article class="metric-card compact-report-card">
+            <span>Receitas</span>
+            <strong id="reportIncome">R$ 0,00</strong>
+          </article>
+          <article class="metric-card compact-report-card danger-card">
+            <span>Despesas</span>
+            <strong id="reportExpense">R$ 0,00</strong>
+          </article>
+          <article class="metric-card compact-report-card">
+            <span>Saldo</span>
+            <strong id="reportBalance">R$ 0,00</strong>
+          </article>
+          <article class="metric-card compact-report-card">
+            <span>Maior gasto</span>
+            <strong id="reportBiggestExpense">R$ 0,00</strong>
+          </article>
+        </div>
+
+        <div class="dashboard-grid secondary-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Resumo mensal</h3>
+                <p id="reportSummaryLabel">Nenhum dado carregado</p>
+              </div>
+              <i data-lucide="clipboard-list"></i>
+            </div>
+            <div class="report-summary-list" id="reportSummaryList"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Categoria mais usada</h3>
+                <p>Baseada nas despesas do período</p>
+              </div>
+              <i data-lucide="tags"></i>
+            </div>
+            <div class="category-highlight" id="reportTopCategory">--</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="metas" aria-labelledby="metas-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="metas-title">Metas financeiras</h2>
+            <p>Economia mensal, limite geral e orçamento por categoria</p>
+          </div>
+          <span class="total-pill neutral" id="goalsStatusPill">Sem meta</span>
+        </div>
+
+        <div class="settings-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Meta do mês</h3>
+                <p>Defina economia desejada e limite de gasto mensal</p>
+              </div>
+              <i data-lucide="target"></i>
+            </div>
+            <form class="admin-form" id="goalsForm">
+              <label class="login-field" for="savingsGoalInput">
+                <span>Meta de economia</span>
+                <input id="savingsGoalInput" type="number" min="0" step="0.01" placeholder="Ex: 1500">
+              </label>
+              <label class="login-field" for="monthlyLimitInput">
+                <span>Limite de gasto mensal</span>
+                <input id="monthlyLimitInput" type="number" min="0" step="0.01" placeholder="Ex: 5000">
+              </label>
+              <button class="google-button login-submit" type="submit">
+                <i data-lucide="save"></i>
+                <span>Salvar metas</span>
+              </button>
+            </form>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Progresso</h3>
+                <p id="goalsProgressLabel">Aguardando dados</p>
+              </div>
+              <i data-lucide="activity"></i>
+            </div>
+            <div class="goal-progress-list" id="goalsProgressList"></div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <h3>Orçamento por categoria</h3>
+              <p>Alimentação, transporte, lazer, compras, saúde e outros</p>
+            </div>
+            <button class="ghost-button" id="saveBudgetsButton" type="button">
+              <i data-lucide="save"></i>
+              <span>Salvar limites</span>
+            </button>
+          </div>
+          <div class="budget-grid" id="budgetCategoryGrid"></div>
+        </article>
+      </section>
+
+      <section class="view" id="onboarding" aria-labelledby="onboarding-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="onboarding-title">Primeiros passos</h2>
+            <p>Guia rápido para começar a testar o MVP</p>
+          </div>
+          <button class="ghost-button" id="onboardingConnectGmailButton" type="button">
+            <i data-lucide="mail-check"></i>
+            <span>Conectar Gmail</span>
+          </button>
+        </div>
+        <div class="onboarding-grid">
+          <article class="panel onboarding-step">
+            <strong>1</strong>
+            <h3>Bem-vindo</h3>
+            <p>O Financeiro Automático organiza seus Pix em entradas, saídas, metas e relatórios.</p>
+          </article>
+          <article class="panel onboarding-step">
+            <strong>2</strong>
+            <h3>Como funciona</h3>
+            <p>Você conecta o Gmail manualmente, o sistema lê e-mails de Pix e monta o dashboard.</p>
+          </article>
+          <article class="panel onboarding-step">
+            <strong>3</strong>
+            <h3>Conectar Gmail</h3>
+            <p>Use o botão desta página ou da barra lateral para autorizar a leitura dos e-mails.</p>
+          </article>
+          <article class="panel onboarding-preview">
+            <div class="panel-header">
+              <div>
+                <h3>Dashboard vazio</h3>
+                <p>Exemplo antes da primeira sincronização</p>
+              </div>
+              <i data-lucide="layout-dashboard"></i>
+            </div>
+            <div class="empty-dashboard-preview">
+              <span>Receitas: R$ 0,00</span>
+              <span>Despesas: R$ 0,00</span>
+              <span>Saldo: R$ 0,00</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="planos" aria-labelledby="planos-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="planos-title">Planos</h2>
+            <p>Estrutura comercial visual para preparar a venda</p>
+          </div>
+        </div>
+        <div class="plans-grid">
+          <article class="panel plan-card">
+            <span>Básico</span>
+            <strong>R$ 19/mês</strong>
+            <p>Dashboard Pix, modo Gmail manual e relatórios CSV.</p>
+            <button class="ghost-button" type="button">Começar teste</button>
+          </article>
+          <article class="panel plan-card featured-plan">
+            <span>Pro</span>
+            <strong>R$ 49/mês</strong>
+            <p>Metas, orçamentos por categoria, backup e histórico completo.</p>
+            <button class="google-button login-submit" type="button">Escolher Pro</button>
+          </article>
+          <article class="panel plan-card">
+            <span>Empresarial</span>
+            <strong>Sob consulta</strong>
+            <p>Multiusuário, admin avançado, suporte e implantação guiada.</p>
+            <button class="ghost-button" type="button">Falar depois</button>
+          </article>
+        </div>
+      </section>
+
       <section class="view" id="configuracoes" aria-labelledby="configuracoes-title">
         <div class="section-heading">
           <div>
@@ -443,6 +834,69 @@
           <article class="panel">
             <div class="panel-header">
               <div>
+                <h3>Perfil e acesso</h3>
+                <p>Dados do login próprio do sistema</p>
+              </div>
+              <i data-lucide="user-cog"></i>
+            </div>
+            <form class="admin-form" id="profileSettingsForm">
+              <label class="login-field" for="profileNameInput">
+                <span>Nome</span>
+                <input id="profileNameInput" type="text" placeholder="Seu nome">
+              </label>
+              <label class="login-field" for="profilePasswordInput">
+                <span>Nova senha</span>
+                <input id="profilePasswordInput" type="password" placeholder="Deixe vazio para manter">
+              </label>
+              <label class="login-field" for="themeSelect">
+                <span>Tema</span>
+                <select id="themeSelect">
+                  <option value="dark">Escuro</option>
+                  <option value="light">Claro</option>
+                </select>
+              </label>
+              <button class="google-button login-submit" type="submit">
+                <i data-lucide="save"></i>
+                <span>Salvar configurações</span>
+              </button>
+            </form>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Contas conectadas</h3>
+                <p>Gmail manual ativo e Outlook preparado para futuro</p>
+              </div>
+              <i data-lucide="mail"></i>
+            </div>
+            <div class="setting-row">
+              <span>Gmail</span>
+              <strong id="settingsGmailStatus">Desconectado</strong>
+            </div>
+            <div class="setting-row">
+              <span>E-mail Gmail</span>
+              <strong id="settingsGmailEmail">--</strong>
+            </div>
+            <div class="backup-actions">
+              <button class="ghost-button" id="settingsConnectGmailButton" type="button">
+                <i data-lucide="mail-check"></i>
+                <span>Conectar Gmail</span>
+              </button>
+              <button class="ghost-button danger-action" id="disconnectGmailButton" type="button">
+                <i data-lucide="unlink"></i>
+                <span>Desconectar Gmail</span>
+              </button>
+              <button class="ghost-button" id="settingsOutlookButton" type="button">
+                <i data-lucide="mail-plus"></i>
+                <span>Outlook/Hotmail Beta</span>
+              </button>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
                 <h3>Resumo técnico</h3>
                 <p>Dados carregados na sessão atual</p>
               </div>
@@ -461,6 +915,47 @@
               <strong id="settingsCategories">0</strong>
             </div>
           </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Backup e exportação</h3>
+                <p>Baixe CSV, gere backup JSON ou importe dados salvos</p>
+              </div>
+              <i data-lucide="archive"></i>
+            </div>
+            <div class="backup-actions">
+              <button class="ghost-button" id="exportAllCsvButton" type="button">
+                <i data-lucide="file-down"></i>
+                <span>Exportar CSV</span>
+              </button>
+              <button class="ghost-button" id="exportBackupJsonButton" type="button">
+                <i data-lucide="download"></i>
+                <span>Backup JSON</span>
+              </button>
+              <label class="ghost-button backup-import-button" for="importBackupJsonInput">
+                <i data-lucide="upload"></i>
+                <span>Importar JSON</span>
+              </label>
+              <input id="importBackupJsonInput" type="file" accept="application/json,.json" hidden>
+            </div>
+            <div class="backup-actions danger-zone">
+              <button class="ghost-button danger-action" id="clearLocalDataButton" type="button">
+                <i data-lucide="trash-2"></i>
+                <span>Limpar dados locais</span>
+              </button>
+            </div>
+          </article>
+          <article class="panel production-checklist-panel">
+            <div class="panel-header">
+              <div>
+                <h3>Checklist de produção</h3>
+                <p>Conferências finais antes de publicar</p>
+              </div>
+              <i data-lucide="clipboard-check"></i>
+            </div>
+            <div class="production-checklist" id="productionChecklist"></div>
+          </article>
         </div>
       </section>
 
@@ -471,6 +966,17 @@
             <p>Usuários liberados para testar o Financeiro Automático</p>
           </div>
           <span class="total-pill neutral" id="adminTotalUsers">0 usuários</span>
+        </div>
+
+        <div class="admin-summary-grid" id="adminSummaryGrid"></div>
+
+        <div class="filter-bar admin-control-bar">
+          <label class="field" for="adminUserFilter">
+            <i data-lucide="filter"></i>
+            <select id="adminUserFilter" aria-label="Filtrar resumo por usuário">
+              <option value="all">Todos usuários</option>
+            </select>
+          </label>
         </div>
 
         <div class="settings-grid admin-grid">
@@ -521,6 +1027,8 @@
                     <th>Nome</th>
                     <th>E-mail</th>
                     <th>Role</th>
+                    <th>Status</th>
+                    <th>Ações</th>
                   </tr>
                 </thead>
                 <tbody id="adminUsersTable"></tbody>
@@ -542,15 +1050,60 @@
                     <th>E-mail</th>
                     <th>Role</th>
                     <th>Status</th>
+                    <th>Ações</th>
                   </tr>
                 </thead>
                 <tbody id="adminInvitesTable"></tbody>
+            </table>
+          </div>
+        </article>
+          <article class="panel admin-logs-panel">
+            <div class="panel-header">
+              <div>
+                <h3>Logs de sistema</h3>
+                <p>Eventos importantes do MVP</p>
+              </div>
+              <i data-lucide="list-checks"></i>
+            </div>
+            <div class="table-wrap">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Data</th>
+                    <th>Evento</th>
+                    <th>Detalhes</th>
+                  </tr>
+                </thead>
+                <tbody id="adminLogsTable"></tbody>
               </table>
             </div>
           </article>
         </div>
       </section>
     </main>
+
+    <nav class="mobile-tabbar" aria-label="Menu rápido mobile">
+      <button type="button" data-mobile-section="dashboard" class="active">
+        <i data-lucide="layout-dashboard"></i>
+        <span>Início</span>
+      </button>
+      <button type="button" data-mobile-section="historico">
+        <i data-lucide="history"></i>
+        <span>Histórico</span>
+      </button>
+      <button type="button" data-mobile-section="vendas">
+        <i data-lucide="shopping-bag"></i>
+        <span>Vendas</span>
+      </button>
+      <button type="button" data-mobile-section="analise">
+        <i data-lucide="brain-circuit"></i>
+        <span>IA</span>
+      </button>
+      <button type="button" data-mobile-section="configuracoes">
+        <i data-lucide="settings"></i>
+        <span>Ajustes</span>
+      </button>
+    </nav>
   </div>
 
   <div class="pix-modal-backdrop" id="pixDetailsModal" hidden>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Financeiro Automático">
+  <rect width="512" height="512" rx="112" fill="#06110d"/>
+  <rect x="48" y="48" width="416" height="416" rx="88" fill="#0b1a14" stroke="#29d47a" stroke-opacity=".32" stroke-width="8"/>
+  <path d="M138 334h236" fill="none" stroke="#dff9ed" stroke-width="24" stroke-linecap="round"/>
+  <path d="M158 306V202c0-22 18-40 40-40h134c22 0 40 18 40 40v104" fill="none" stroke="#29d47a" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M194 252h124" fill="none" stroke="#dff9ed" stroke-width="22" stroke-linecap="round"/>
+  <path d="M194 292h84" fill="none" stroke="#dff9ed" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="348" cy="286" r="46" fill="#29d47a"/>
+  <path d="M348 258v56m-24-32 24-24 24 24" fill="none" stroke="#06110d" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

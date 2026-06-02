@@ -1,6 +1,7 @@
 (function () {
   "use strict";
 
+  const FINANCEIRO_LOG_PREFIX = "[Financeiro Automático]";
   const API_URL = "https://script.google.com/macros/s/AKfycbx7sixleHf2AaEO2B1kl3QdJJrXHDAJ7tWnXfSc5g4xVSn-YgBhlpOhy3ASUvbK7SQiTw/exec";
   const FIREBASE_CONFIG = window.FIREBASE_CONFIG || {
     apiKey: "AIzaSyBCtEfGlMLaT7TyX0L0jN7oh-ezBzYEO1Q",
@@ -25,6 +26,8 @@
   const GMAIL_CONNECTION_PREFIX = "financeiroAutomaticoGmailConnection:";
   const DATA_SOURCE_PREFIX = "financeiroAutomaticoDataSource:";
   const INVITES_STORAGE_KEY = "financeiroAutomaticoInvites";
+  const SALES_STORAGE_PREFIX = "financeiroAutomaticoSales:";
+  const SETTINGS_STORAGE_PREFIX = "financeiroAutomaticoSettings:";
   const USERS = loadUsers();
   const INVITES = loadInvites();
   const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
@@ -88,6 +91,13 @@
     gmailSessionExpired: false,
     gmailFetchInProgress: false,
     lastGmailRequestAt: 0,
+    manualSales: [],
+    allSales: [],
+    appSettings: null,
+    userSettings: {},
+    growthDataLoadedFor: "",
+    adminUserFilter: "all",
+    editingSaleId: "",
     loadId: 0,
     connection: "Aguardando API"
   };
@@ -126,6 +136,7 @@
     renderApp();
     updateAccessControl();
     createIcons();
+    initGrowthFeatures();
   }
 
   function cacheDom() {
@@ -484,6 +495,10 @@
       state.monthlySeries = [];
       state.dataLoaded = false;
       state.dataSource = "api";
+      state.manualSales = [];
+      state.allSales = [];
+      state.appSettings = null;
+      state.growthDataLoadedFor = "";
     }
 
     state.systemUser = {
@@ -496,6 +511,7 @@
     dom.systemLoginError.hidden = true;
     dom.systemLoginForm.reset();
     updateAccessControl();
+    addSystemLog("login realizado", `${state.systemUser.email} entrou no sistema`);
     showToast(`Bem-vindo, ${state.systemUser.name}.`);
   }
 
@@ -508,6 +524,10 @@
     state.dataSource = "api";
     state.data = createEmptyData(state.month, state.year);
     state.monthlySeries = [];
+    state.manualSales = [];
+    state.allSales = [];
+    state.appSettings = null;
+    state.growthDataLoadedFor = "";
     updateAccessControl();
     renderSourceMode();
     showToast("Você saiu do sistema.");
@@ -528,7 +548,7 @@
         });
       }
     } catch (error) {
-      console.warn("Não foi possível carregar usuários locais.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar usuários locais.`, error);
     }
 
     return Array.from(usersByEmail.values());
@@ -539,7 +559,7 @@
       window.localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(USERS));
       return true;
     } catch (error) {
-      console.warn("Não foi possível salvar usuários locais.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar usuários locais.`, error);
       return false;
     }
   }
@@ -550,6 +570,7 @@
       password: safeText(user && user.password, ""),
       name: safeText(user && user.name, safeText(user && user.email, "Usuário")),
       role: safeText(user && user.role, "user").toLocaleLowerCase("pt-BR") === "admin" ? "admin" : "user",
+      blocked: Boolean(user && user.blocked),
       createdAt: safeText(user && user.createdAt, new Date().toISOString())
     };
   }
@@ -572,7 +593,7 @@
       return;
     }
 
-    const existingUnused = INVITES.find((item) => normalizeEmail(item.email) === normalizeEmail(invite.email) && !item.usedAt);
+    const existingUnused = INVITES.find((item) => normalizeEmail(item.email) === normalizeEmail(invite.email) && !item.usedAt && item.status !== "canceled");
     const finalInvite = existingUnused || invite;
 
     if (!existingUnused) {
@@ -580,6 +601,7 @@
       saveInvites();
     }
     saveInviteToFirestore(finalInvite);
+    addSystemLog("convite criado", `${finalInvite.email} (${finalInvite.role})`);
 
     const link = buildInviteLink(finalInvite.token);
     dom.adminInviteLink.value = link;
@@ -619,7 +641,7 @@
       const stored = JSON.parse(window.localStorage.getItem(INVITES_STORAGE_KEY) || "[]");
       return Array.isArray(stored) ? stored.map(normalizeInvite).filter((invite) => invite.token && invite.email) : [];
     } catch (error) {
-      console.warn("Não foi possível carregar convites locais.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar convites locais.`, error);
       return [];
     }
   }
@@ -629,7 +651,7 @@
       window.localStorage.setItem(INVITES_STORAGE_KEY, JSON.stringify(INVITES));
       return true;
     } catch (error) {
-      console.warn("Não foi possível salvar convites locais.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar convites locais.`, error);
       return false;
     }
   }
@@ -665,7 +687,7 @@
     const token = getInviteTokenFromUrl();
     if (!token) return null;
 
-    return INVITES.find((invite) => invite.token === token && !invite.usedAt) || null;
+    return INVITES.find((invite) => invite.token === token && !invite.usedAt && invite.status === "active") || null;
   }
 
   function renderInviteGate() {
@@ -748,6 +770,7 @@
     saveSystemSession(state.systemUser);
     saveCurrentUserToFirestore();
     saveInviteToFirestore(invite);
+    addSystemLog("usuário cadastrado", `${user.email} concluiu o convite (${user.role})`);
     dom.inviteSignupForm.reset();
     updateAccessControl();
     showToast("Cadastro concluído. Bem-vindo!");
@@ -776,7 +799,7 @@
   }
 
   function isSystemUserAllowed(email) {
-    return USERS.some((user) => normalizeEmail(user.email) === normalizeEmail(email));
+    return USERS.some((user) => normalizeEmail(user.email) === normalizeEmail(email) && !user.blocked);
   }
 
   function initFirebaseServices() {
@@ -865,7 +888,7 @@
       state.firestoreDb = null;
       state.firestoreReady = false;
       state.firestoreError = error.message || "Erro ao iniciar Firestore.";
-      console.warn("Firestore indisponível. Usando fallback localStorage.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore indisponível. Usando fallback localStorage.`, error);
       return false;
     }
   }
@@ -913,9 +936,17 @@
       if (state.gmailPixTransactions.length) {
         await saveTransactionsToFirestore(state.gmailPixTransactions);
       }
+      if (state.manualSales.length) {
+        for (const sale of state.manualSales) {
+          await saveSaleToFirestore(sale);
+        }
+      }
+      if (state.appSettings) {
+        await saveSettingsToFirestore(state.appSettings);
+      }
     } catch (error) {
       state.firestoreError = error.message || "Falha ao sincronizar Firestore.";
-      console.warn("Firestore falhou. Mantendo fallback localStorage.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore falhou. Mantendo fallback localStorage.`, error);
     } finally {
       state.firestoreSyncing = false;
     }
@@ -934,7 +965,7 @@
       renderAdmin();
     } catch (error) {
       state.firestoreError = error.message || "Falha ao carregar Firestore.";
-      console.warn("Firestore indisponível. Usando fallback localStorage.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore indisponível. Usando fallback localStorage.`, error);
     }
   }
 
@@ -949,6 +980,7 @@
         ...data,
         email: data.email || doc.id,
         password: data.password || (localUser && localUser.password) || "",
+        blocked: Boolean(data.blocked),
         createdAt: data.createdAt || ""
       });
 
@@ -1007,7 +1039,7 @@
       return true;
     } catch (error) {
       state.firestoreError = error.message || "Falha ao buscar convite.";
-      console.warn("Convite não carregou no Firestore. Usando fallback localStorage.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Convite não carregou no Firestore. Usando fallback localStorage.`, error);
       return false;
     } finally {
       state.inviteLookupInProgress = false;
@@ -1058,6 +1090,7 @@
       name: normalized.name,
       email: normalizeEmail(normalized.email),
       role: normalized.role,
+      blocked: Boolean(normalized.blocked),
       createdAt: normalized.createdAt || new Date().toISOString()
     };
 
@@ -1070,7 +1103,7 @@
       return true;
     } catch (error) {
       state.firestoreError = error.message || "Falha ao salvar usuário.";
-      console.warn("Usuário mantido no fallback localStorage.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Usuário mantido no fallback localStorage.`, error);
       return false;
     }
   }
@@ -1085,14 +1118,14 @@
       await state.firestoreDb.collection("invites").doc(normalized.token).set({
         email: normalizeEmail(normalized.email),
         role: normalized.role,
-        status: normalized.usedAt ? "used" : normalized.status || "active",
+        status: normalized.status === "canceled" ? "canceled" : normalized.usedAt ? "used" : normalized.status || "active",
         createdAt: normalized.createdAt || new Date().toISOString(),
         usedAt: normalized.usedAt || ""
       }, { merge: true });
       return true;
     } catch (error) {
       state.firestoreError = error.message || "Falha ao salvar convite.";
-      console.warn("Convite mantido no fallback localStorage.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Convite mantido no fallback localStorage.`, error);
       return false;
     }
   }
@@ -1116,7 +1149,7 @@
       return true;
     } catch (error) {
       state.firestoreError = error.message || "Falha ao salvar transações.";
-      console.warn("Transações mantidas no fallback localStorage.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Transações mantidas no fallback localStorage.`, error);
       return false;
     }
   }
@@ -1125,6 +1158,7 @@
     const gmailMessageId = transaction.gmailMessageId || transaction.emailId || transaction.id || "";
 
     return {
+      id: transaction.id || gmailMessageId || transaction.hash || "",
       tipo: transaction.tipo,
       nome: transaction.nome || transaction.destino || "",
       valor: Number(transaction.valor) || 0,
@@ -1133,6 +1167,8 @@
       banco: transaction.banco || transaction.origemPix || transaction.origem || "",
       origem: "gmail",
       gmailMessageId,
+      hash: transaction.hash || createPixHash(`${transaction.tipo}|${transaction.nome}|${transaction.valor}|${transaction.data}`),
+      rawSnippet: transaction.rawSnippet || transaction.snippet || "",
       createdAt: new Date().toISOString()
     };
   }
@@ -1150,13 +1186,16 @@
       data: safeText(data.data, ""),
       categoria: safeText(data.categoria, "Gmail / Pix"),
       banco: safeText(data.banco, ""),
+      origem: safeText(data.origem, "gmail"),
+      hash: safeText(data.hash, ""),
+      rawSnippet: safeText(data.rawSnippet, ""),
       descricao: `Pix identificado no ${safeText(data.origem, "gmail")}`,
       raw: clonePlainObject(data)
     };
   }
 
   function getTransactionFirestoreId(transaction, index) {
-    const base = transaction.emailId || transaction.id || transaction.transactionId || `${transaction.tipo}-${transaction.data}-${transaction.nome}-${transaction.valor}-${index}`;
+    const base = transaction.gmailMessageId || transaction.emailId || transaction.hash || transaction.id || transaction.transactionId || `${transaction.tipo}-${transaction.data}-${transaction.nome}-${transaction.valor}-${index}`;
     return encodeURIComponent(String(base).replace(/\//g, "-")).slice(0, 420);
   }
 
@@ -1244,6 +1283,7 @@
       state.gmailConnectedAt = new Date().toISOString();
       state.gmailSessionExpired = false;
       saveGmailConnectionMetadata();
+      addSystemLog("Gmail conectado", state.gmailEmail || "Conta Google autorizada");
       await searchPixInConnectedGmail(true);
     } catch (error) {
       if (isGmailAuthExpiredError(error)) {
@@ -1297,6 +1337,7 @@
       applyGmailPixToDashboard();
 
       dom.authStatus.textContent = `${pixTransactions.length} Pix identificados via Gmail.`;
+      addSystemLog("sync realizado", `${pixTransactions.length} Pix identificados via Gmail`);
       showToast(`${pixTransactions.length} Pix identificados via Gmail.`);
     } catch (error) {
       if (isGmailAuthExpiredError(error)) {
@@ -1385,13 +1426,31 @@
 
   function extractPixTransactionsFromEmails(emails) {
     const transactions = [];
+    const seen = new Set();
 
     emails.forEach((email) => {
       const parsed = parsePixEmail(email);
 
-      if (parsed) {
-        transactions.push(parsed);
+      if (!parsed) return;
+
+      const keys = [
+        parsed.gmailMessageId,
+        parsed.hash,
+        `${parsed.data}|${parsed.valor}|${normalizeForSearch(parsed.nome)}`
+      ].filter(Boolean);
+      const duplicated = keys.some((key) => seen.has(key));
+
+      if (duplicated) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Pix duplicado ignorado`, {
+          gmailMessageId: parsed.gmailMessageId,
+          nome: parsed.nome,
+          valor: parsed.valor
+        });
+        return;
       }
+
+      keys.forEach((key) => seen.add(key));
+      transactions.push(parsed);
     });
 
     console.log(`Pix identificados com sucesso: ${transactions.length}/${emails.length}`);
@@ -1405,22 +1464,52 @@
     const name = extractPixName(sourceText, type, email);
     const date = extractPixDate(sourceText) || formatGmailHeaderDate(email.date);
     const category = extractPixCategory(sourceText, type, name);
+    const bank = extractPixBankName(sourceText);
+    const gmailMessageId = email.id || "";
+    const rawSnippet = safeText(email.snippet || sourceText.slice(0, 240), "");
+    const hash = createPixHash(`${type}|${name}|${value}|${date}|${bank}|${rawSnippet.slice(0, 80)}`);
 
     if (!type || !value || !name || !date) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} E-mail Pix ignorado por dados incompletos`, {
+        gmailMessageId,
+        hasType: Boolean(type),
+        hasValue: Boolean(value),
+        hasName: Boolean(name),
+        hasDate: Boolean(date),
+        subject: email.subject || ""
+      });
       return null;
     }
 
     return {
+      id: gmailMessageId || hash,
       tipo: type,
       nome: name,
       valor: value,
       data: date,
       categoria: category,
+      origem: "gmail",
+      banco: bank,
+      gmailMessageId,
+      hash,
+      rawSnippet,
       descricao: type === "recebido" ? "Pix recebido via Gmail" : "Pix enviado via Gmail",
       emailId: email.id,
       subject: email.subject,
       raw: email
     };
+  }
+
+  function createPixHash(value) {
+    const text = String(value || "");
+    let hash = 0;
+
+    for (let index = 0; index < text.length; index += 1) {
+      hash = ((hash << 5) - hash) + text.charCodeAt(index);
+      hash |= 0;
+    }
+
+    return `pix_${Math.abs(hash).toString(36)}`;
   }
 
   function detectPixType(text, matchedQueries) {
@@ -1661,7 +1750,7 @@
 
       if (response.status === 429 && attempt < GMAIL_MAX_RETRIES) {
         const retryDelay = getGmailRetryDelay(response, attempt);
-        console.warn(`Gmail API 429. Tentando novamente em ${retryDelay}ms (${attempt + 1}/${GMAIL_MAX_RETRIES}).`);
+        console.warn(`${FINANCEIRO_LOG_PREFIX} Gmail API 429. Tentando novamente em ${retryDelay}ms (${attempt + 1}/${GMAIL_MAX_RETRIES}).`);
         await delay(retryDelay);
         continue;
       }
@@ -1776,8 +1865,8 @@
 
   function gmailPixToEntrada(pix, index) {
     return {
-      id: pix.emailId || `gmail-entrada-${index}`,
-      transactionId: pix.emailId || "",
+      id: pix.gmailMessageId || pix.emailId || pix.id || `gmail-entrada-${index}`,
+      transactionId: pix.gmailMessageId || pix.emailId || "",
       index,
       tipo: "entrada",
       data: pix.data,
@@ -1786,14 +1875,19 @@
       nome: pix.nome,
       categoria: pix.categoria || "Recebimentos",
       descricao: pix.descricao || "Pix identificado no Gmail",
+      origem: "gmail",
+      banco: pix.banco || "",
+      gmailMessageId: pix.gmailMessageId || pix.emailId || "",
+      hash: pix.hash || "",
+      rawSnippet: pix.rawSnippet || pix.snippet || "",
       raw: pix.raw || pix
     };
   }
 
   function gmailPixToSaida(pix, index) {
     return {
-      id: pix.emailId || `gmail-saida-${index}`,
-      transactionId: pix.emailId || "",
+      id: pix.gmailMessageId || pix.emailId || pix.id || `gmail-saida-${index}`,
+      transactionId: pix.gmailMessageId || pix.emailId || "",
       index,
       tipo: "saida",
       data: pix.data,
@@ -1803,6 +1897,11 @@
       destino: pix.nome,
       categoria: pix.categoria || "Gmail / Pix",
       descricao: pix.descricao || "Pix identificado no Gmail",
+      origem: "gmail",
+      banco: pix.banco || "",
+      gmailMessageId: pix.gmailMessageId || pix.emailId || "",
+      hash: pix.hash || "",
+      rawSnippet: pix.rawSnippet || pix.snippet || "",
       raw: pix.raw || pix
     };
   }
@@ -1822,9 +1921,22 @@
         gmailEmail: state.gmailEmail,
         gmailConnectedAt: state.gmailConnectedAt || new Date().toISOString()
       }));
+      if (state.systemUser) {
+        state.appSettings = normalizeAppSettings({
+          ...(state.appSettings || {}),
+          email: state.systemUser.email,
+          name: state.systemUser.name,
+          gmailConnected: true,
+          gmailEmail: state.gmailEmail,
+          gmailConnectedAt: state.gmailConnectedAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        saveSettingsToLocal(state.appSettings);
+        saveSettingsToFirestore(state.appSettings);
+      }
       return true;
     } catch (error) {
-      console.warn("Não foi possível salvar conexão Gmail.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar conexão Gmail.`, error);
       return false;
     }
   }
@@ -1846,7 +1958,7 @@
         gmailConnectedAt: safeText(stored.gmailConnectedAt, "")
       };
     } catch (error) {
-      console.warn("Não foi possível restaurar conexão Gmail.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível restaurar conexão Gmail.`, error);
       return null;
     }
   }
@@ -1903,7 +2015,7 @@
       window.localStorage.setItem(key, payload);
       return true;
     } catch (error) {
-      console.warn("Não foi possível salvar dados Gmail da sessão.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar dados Gmail da sessão.`, error);
       return false;
     }
   }
@@ -1924,7 +2036,7 @@
       state.gmailPixTransactions = transactions;
       return true;
     } catch (error) {
-      console.warn("Não foi possível carregar dados Gmail da sessão.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar dados Gmail da sessão.`, error);
       return false;
     }
   }
@@ -2113,7 +2225,7 @@
     try {
       window.localStorage.setItem(key, source === "gmail" ? "gmail" : "api");
     } catch (error) {
-      console.warn("Não foi possível salvar preferência de fonte.", error);
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar preferência de fonte.`, error);
     }
   }
 
@@ -2154,28 +2266,48 @@
     dom.adminTotalUsers.textContent = `${USERS.length} ${USERS.length === 1 ? "usuário" : "usuários"}`;
 
     if (!isAdmin) {
-      dom.adminUsersTable.innerHTML = emptyRow(3);
-      dom.adminInvitesTable.innerHTML = emptyRow(3);
+      dom.adminUsersTable.innerHTML = emptyRow(5);
+      dom.adminInvitesTable.innerHTML = emptyRow(4);
       return;
     }
 
     dom.adminUsersTable.innerHTML = USERS.map((user) => `
-      <tr>
-        <td class="name-cell">${escapeHtml(user.name)}</td>
-        <td>${escapeHtml(user.email)}</td>
-        <td><span class="tag">${escapeHtml(user.role)}</span></td>
+      <tr data-admin-user-email="${escapeAttribute(user.email)}">
+        <td data-label="Nome" class="name-cell">${escapeHtml(user.name)}</td>
+        <td data-label="E-mail">${escapeHtml(user.email)}</td>
+        <td data-label="Role">
+          <select class="table-select" data-admin-role aria-label="Editar role de ${escapeAttribute(user.email)}">
+            <option value="user" ${user.role === "user" ? "selected" : ""}>user</option>
+            <option value="admin" ${user.role === "admin" ? "selected" : ""}>admin</option>
+          </select>
+        </td>
+        <td data-label="Status">
+          <span class="tx-type ${user.blocked ? "saida" : "entrada"}">${user.blocked ? "Bloqueado" : "Ativo"}</span>
+          <small class="admin-gmail-status">${(state.userSettings && state.userSettings[normalizeEmail(user.email)] && state.userSettings[normalizeEmail(user.email)].gmailConnected) ? "Gmail conectado" : "Gmail desconectado"}</small>
+        </td>
+        <td data-label="Ações">
+          <button class="mini-action" type="button" data-admin-user-action="toggle-block">
+            <i data-lucide="${user.blocked ? "unlock" : "lock"}"></i>
+          </button>
+        </td>
       </tr>
     `).join("");
 
     dom.adminInvitesTable.innerHTML = INVITES.length
       ? INVITES.slice().reverse().map((invite) => `
-        <tr>
-          <td class="name-cell">${escapeHtml(invite.email)}</td>
-          <td><span class="tag">${escapeHtml(invite.role)}</span></td>
-          <td><span class="tx-type ${invite.usedAt ? "saida" : "entrada"}">${invite.usedAt ? "Usado" : "Disponível"}</span></td>
+        <tr data-admin-invite-token="${escapeAttribute(invite.token)}">
+          <td data-label="E-mail" class="name-cell">${escapeHtml(invite.email)}</td>
+          <td data-label="Role"><span class="tag">${escapeHtml(invite.role)}</span></td>
+          <td data-label="Status"><span class="tx-type ${invite.status === "canceled" ? "saida" : invite.usedAt ? "neutral" : "entrada"}">${invite.status === "canceled" ? "Cancelado" : invite.usedAt ? "Usado" : "Disponível"}</span></td>
+          <td data-label="Ações">
+            <div class="row-actions">
+              <button class="mini-action" type="button" data-admin-invite-action="copy" title="Copiar convite"><i data-lucide="copy"></i></button>
+              <button class="mini-action danger-action" type="button" data-admin-invite-action="cancel" title="Cancelar convite" ${invite.usedAt || invite.status === "canceled" ? "disabled" : ""}><i data-lucide="ban"></i></button>
+            </div>
+          </td>
         </tr>
       `).join("")
-      : emptyRow(3);
+      : emptyRow(4);
 
     createIcons();
   }
@@ -2201,11 +2333,17 @@
 
   function friendlyAuthError(error) {
     const code = error && error.code ? error.code : "";
+    if (code === "auth/unauthorized-domain") {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firebase Auth domínio não autorizado`, {
+        domain: window.location.hostname,
+        expectedDomain: "teste-three-topaz.vercel.app"
+      });
+    }
     const messages = {
       "auth/popup-closed-by-user": "janela de login fechada antes de concluir.",
       "auth/cancelled-popup-request": "já existe uma janela de login aberta.",
       "auth/popup-blocked": "o navegador bloqueou o popup de login.",
-      "auth/unauthorized-domain": "domínio não autorizado no Firebase Authentication.",
+      "auth/unauthorized-domain": "Domínio não autorizado no Firebase. Adicione o domínio da Vercel em Authentication > Settings > Authorized domains.",
       "auth/user-mismatch": "a conta escolhida é diferente da conta logada no sistema.",
       "auth/network-request-failed": "falha de rede ao falar com o Firebase."
     };
@@ -2450,6 +2588,7 @@
       nome,
       categoria: descricao,
       descricao,
+      origem: "api",
       raw: clonePlainObject(item)
     };
   }
@@ -2473,6 +2612,7 @@
       destino,
       categoria,
       descricao: categoria,
+      origem: "api",
       raw: clonePlainObject(item)
     };
   }
@@ -2617,10 +2757,10 @@
     dom.receivedTable.innerHTML = rows.length
       ? rows.map((row, index) => `
         <tr class="clickable-row" data-pix-index="${index}" tabindex="0" role="button" aria-label="Ver detalhes do PIX recebido de ${escapeAttribute(row.nome)}">
-          <td>${escapeHtml(row.data)}</td>
-          <td class="align-right amount entrada">+ ${escapeHtml(formatCurrency(row.valor))}</td>
-          <td class="name-cell"><button class="name-button" type="button">${escapeHtml(row.nome)}</button></td>
-          <td><span class="tag">${escapeHtml(row.descricao)}</span></td>
+          <td data-label="Data">${escapeHtml(row.data)}</td>
+          <td data-label="Valor" class="align-right amount entrada">+ ${escapeHtml(formatCurrency(row.valor))}</td>
+          <td data-label="Quem enviou" class="name-cell"><button class="name-button" type="button">${escapeHtml(row.nome)}</button></td>
+          <td data-label="Descrição"><span class="tag">${escapeHtml(row.descricao)}</span></td>
         </tr>
       `).join("")
       : emptyRow(4);
@@ -2631,10 +2771,10 @@
     dom.sentTable.innerHTML = rows.length
       ? rows.map((row, index) => `
         <tr class="clickable-row" data-pix-index="${index}" tabindex="0" role="button" aria-label="Ver detalhes do PIX enviado para ${escapeAttribute(row.destino)}">
-          <td>${escapeHtml(row.data)}</td>
-          <td class="align-right amount saida">- ${escapeHtml(formatCurrency(row.valor))}</td>
-          <td class="name-cell"><button class="name-button" type="button">${escapeHtml(row.destino)}</button></td>
-          <td><span class="tag">${escapeHtml(row.categoria)}</span></td>
+          <td data-label="Data">${escapeHtml(row.data)}</td>
+          <td data-label="Valor" class="align-right amount saida">- ${escapeHtml(formatCurrency(row.valor))}</td>
+          <td data-label="Destino" class="name-cell"><button class="name-button" type="button">${escapeHtml(row.destino)}</button></td>
+          <td data-label="Categoria"><span class="tag">${escapeHtml(row.categoria)}</span></td>
         </tr>
       `).join("")
       : emptyRow(4);
@@ -2642,6 +2782,7 @@
 
   function renderRecentTable() {
     const rows = state.data.historico.slice(0, 8);
+    state.recentHistoryRows = rows;
     dom.recentTable.innerHTML = rows.length
       ? rows.map(renderHistoryRow).join("")
       : emptyRow(5);
@@ -2661,19 +2802,20 @@
     });
 
     dom.historyCount.textContent = `${rows.length} movimentações`;
+    state.visibleHistoryRows = rows;
     dom.historyTable.innerHTML = rows.length ? rows.map(renderHistoryRow).join("") : emptyRow(5);
     createIcons();
   }
 
-  function renderHistoryRow(row) {
+  function renderHistoryRow(row, index) {
     const sign = row.tipo === "entrada" ? "+" : "-";
     return `
-      <tr>
-        <td><span class="tx-type ${row.tipo}">${row.tipo === "entrada" ? "Entrada" : "Saída"}</span></td>
-        <td>${escapeHtml(row.data)}</td>
-        <td class="name-cell">${escapeHtml(row.nome)}</td>
-        <td><span class="tag">${escapeHtml(row.categoria)}</span></td>
-        <td class="align-right amount ${row.tipo}">${sign} ${escapeHtml(formatCurrency(row.valor))}</td>
+      <tr class="clickable-row" data-history-index="${index}" tabindex="0" role="button">
+        <td data-label="Tipo"><span class="tx-type ${row.tipo}">${row.tipo === "entrada" ? "Entrada" : "Saída"}</span></td>
+        <td data-label="Data">${escapeHtml(row.data)}</td>
+        <td data-label="Nome" class="name-cell">${escapeHtml(row.nome)}</td>
+        <td data-label="Categoria"><span class="tag">${escapeHtml(row.categoria)}</span></td>
+        <td data-label="Valor" class="align-right amount ${row.tipo}">${sign} ${escapeHtml(formatCurrency(row.valor))}</td>
       </tr>
     `;
   }
@@ -2990,6 +3132,7 @@
     }
 
     dom.navLinks.forEach((button) => button.classList.toggle("active", button.dataset.section === section));
+    document.querySelectorAll("[data-mobile-section]").forEach((button) => button.classList.toggle("active", button.dataset.mobileSection === section));
     dom.views.forEach((view) => view.classList.toggle("active-view", view.id === section));
     dom.pageTitle.textContent = sectionTitle(section);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -3003,6 +3146,12 @@
       realizados: "Pix Realizados",
       historico: "Histórico",
       categorias: "Categorias",
+      vendas: "Vendas",
+      analise: "Assistente Financeiro",
+      relatorios: "Relatórios",
+      metas: "Metas",
+      onboarding: "Primeiros passos",
+      planos: "Planos",
       configuracoes: "Configurações",
       admin: "Admin"
     };
@@ -3055,16 +3204,37 @@
           this.close();
         }
       });
+      this.content.addEventListener("click", (event) => {
+        const action = event.target.closest("[data-detail-action]")?.dataset.detailAction;
+        if (!action || !this.currentTransaction) return;
+        if (action === "edit-category") editTransactionCategory(this.currentTransaction);
+        if (action === "delete-sale") {
+          const sale = findSaleById(this.currentTransaction.id, this.currentTransaction.ownerEmail);
+          if (sale) {
+            this.close();
+            deleteSale(sale);
+          }
+        }
+      });
     }
 
     open(transaction) {
       this.requestId += 1;
       const requestId = this.requestId;
+      this.currentTransaction = transaction;
 
       window.clearTimeout(this.closeTimer);
       this.renderHeader(transaction);
       this.renderLoading();
       this.show();
+
+      if (transaction.origem === "venda_manual" || transaction.origem === "gmail") {
+        this.renderDetails(transaction, null, {
+          hasRemoteDetails: false,
+          localOnly: true
+        });
+        return;
+      }
 
       requestPixDetails(transaction)
         .then((details) => {
@@ -3139,7 +3309,10 @@
       const model = buildPixDetailModel(transaction, details);
       const hasExtras = model.extraFields.length > 0;
 
-      if (meta.error) {
+      if (meta.localOnly) {
+        this.notice.hidden = true;
+        this.notice.textContent = "";
+      } else if (meta.error) {
         this.notice.hidden = false;
         this.notice.textContent = `Não foi possível buscar detalhes completos pela API (${meta.error}). Exibindo os dados disponíveis da listagem.`;
       } else if (!meta.hasRemoteDetails) {
@@ -3158,6 +3331,18 @@
           </div>
           <div class="pix-detail-grid">
             ${model.standardFields.map(renderDetailField).join("")}
+          </div>
+          <div class="modal-actions">
+            <button class="ghost-button" type="button" data-detail-action="edit-category">
+              <i data-lucide="tags"></i>
+              <span>Editar categoria</span>
+            </button>
+            ${transaction.origem === "venda_manual" ? `
+              <button class="ghost-button danger-action" type="button" data-detail-action="delete-sale">
+                <i data-lucide="trash-2"></i>
+                <span>Excluir venda</span>
+              </button>
+            ` : ""}
           </div>
         </section>
 
@@ -3230,6 +3415,10 @@
       hora: dateTime.time,
       descricao: transaction.descricao,
       categoria: transaction.categoria,
+      origem: transaction.origem || readField(raw, ["origem"]),
+      banco: transaction.banco || readField(raw, ["banco", "instituicao"]),
+      gmailMessageId: transaction.gmailMessageId || transaction.emailId || readField(raw, ["gmailMessageId", "emailId"]),
+      observacoes: transaction.observacao || readField(raw, ["observacoes", "observacao", "obs"]),
       origemPix: transaction.tipo === "entrada" ? transaction.nome : readField(raw, ["origem", "origemPix", "contaOrigem"]),
       destinoPix: transaction.tipo === "saida" ? transaction.destino : readField(raw, ["destino", "destinoPix", "contaDestino"]),
       idTransacao: transaction.transactionId || readField(raw, ["id", "ID", "idTransacao", "transactionId", "endToEndId", "e2eId"])
@@ -3239,6 +3428,7 @@
 
     const standardFields = [
       createDetailField(flat, usedKeys, "Nome completo", ["nomeCompleto", "nome", "quemEnviou", "remetente", "pagador", "destino", "favorecido", "recebedor"], transaction.nome),
+      createDetailField(flat, usedKeys, "Origem", ["origem"], transaction.origem || "api"),
       createDetailField(flat, usedKeys, "CPF", ["cpf", "documento", "cpfCnpj", "cpf_cnpj", "cpfOrigem", "cpfDestino", "documentoPessoa"]),
       createDetailField(flat, usedKeys, "Banco", ["banco", "instituicao", "instituicaoFinanceira", "bancoOrigem", "bancoDestino", "ispb"]),
       createDetailField(flat, usedKeys, "Tipo da chave PIX", ["tipoChavePix", "tipoChave", "tipo_da_chave", "chaveTipo"]),
@@ -3247,6 +3437,7 @@
       createDetailField(flat, usedKeys, "Data", ["dataPix", "dataPagamento", "dataTransacao", "data"], dateTime.date),
       createDetailField(flat, usedKeys, "Hora", ["hora", "horario", "horaPagamento", "horaTransacao"], dateTime.time),
       createDetailField(flat, usedKeys, "ID da transação", ["idTransacao", "id_transacao", "transactionId", "endToEndId", "e2eId", "codigoTransacao"]),
+      createDetailField(flat, usedKeys, "ID Gmail", ["gmailMessageId", "emailId"]),
       createDetailField(flat, usedKeys, "Status", ["status", "situacao", "estado"]),
       createDetailField(flat, usedKeys, "Descrição", ["descricao", "descrição", "description", "historico"], transaction.descricao),
       createDetailField(flat, usedKeys, "Categoria", ["categoria", "category"], transaction.categoria),
@@ -3268,6 +3459,45 @@
       standardFields,
       extraFields
     };
+  }
+
+  function editTransactionCategory(transaction) {
+    const nextCategory = window.prompt("Nova categoria da transação:", transaction.categoria || "");
+    if (!nextCategory) return;
+
+    transaction.categoria = nextCategory;
+
+    if (transaction.origem === "venda_manual") {
+      const sale = findSaleById(transaction.id, transaction.ownerEmail);
+      if (sale) {
+        sale.categoria = nextCategory;
+        sale.updatedAt = new Date().toISOString();
+        upsertSaleInState(sale);
+        saveSalesToLocal(sale.ownerEmail, state.allSales.filter((item) => normalizeEmail(item.ownerEmail) === normalizeEmail(sale.ownerEmail)));
+        saveSaleToFirestore(sale);
+      }
+    } else if (transaction.origem === "gmail" || transaction.gmailMessageId) {
+      state.gmailPixTransactions = state.gmailPixTransactions.map((item) => {
+        const same = (item.gmailMessageId || item.emailId || item.id) === (transaction.gmailMessageId || transaction.emailId || transaction.id);
+        return same ? { ...item, categoria: nextCategory } : item;
+      });
+      saveGmailSessionData(state.gmailPixTransactions);
+      saveTransactionsToFirestore(state.gmailPixTransactions);
+      if (state.dataSource === "gmail") applyGmailPixToDashboard({ silent: true });
+    }
+
+    const updateCategory = (item) => {
+      if ((transaction.id && item.id === transaction.id) || (transaction.gmailMessageId && (item.gmailMessageId === transaction.gmailMessageId || item.emailId === transaction.gmailMessageId))) {
+        item.categoria = nextCategory;
+      }
+    };
+    state.data.entradas.forEach(updateCategory);
+    state.data.saidas.forEach(updateCategory);
+    state.data.historico.forEach(updateCategory);
+    mergeManualSalesIntoDashboard();
+    renderApp();
+    state.pixDetailsModal.open(transaction);
+    showToast("Categoria atualizada.");
   }
 
   function createDetailField(flat, usedKeys, label, keys, fallback = "") {
@@ -3663,5 +3893,1798 @@
     }
 
     return periods;
+  }
+  const GROWTH_CATEGORIES = [
+    "Alimentação",
+    "Transporte",
+    "Lazer",
+    "Compras",
+    "Saúde",
+    "Outros"
+  ];
+  const GOALS_STORAGE_PREFIX = "financeiroAutomaticoGoals";
+  const BUDGET_STORAGE_PREFIX = "financeiroAutomaticoBudgets";
+  const SYSTEM_LOGS_STORAGE_KEY = "financeiroAutomaticoSystemLogs";
+  const SALE_CATEGORIES = ["Serviços", "Produtos", "Consultoria", "Assinatura", "Outros"];
+
+  function initGrowthFeatures() {
+    if (state.growthFeaturesInitialized) return;
+
+    state.growthFeaturesInitialized = true;
+    state.deferredInstallPrompt = null;
+    state.manualSales = loadSalesFromLocal();
+    state.allSales = state.manualSales.slice();
+    state.appSettings = loadSettingsFromLocal();
+    applyAppSettings();
+    wrapGrowthRenderers();
+    registerPwa();
+    populateGrowthMonthControls();
+    bindGrowthControls();
+    resetSaleForm();
+    syncAccessLanding();
+    outlookAuth("init");
+    hydrateGrowthDataForCurrentUser();
+    renderGrowthFeatures();
+  }
+
+  function wrapGrowthRenderers() {
+    if (state.growthRenderersWrapped) return;
+
+    state.growthRenderersWrapped = true;
+    const baseRenderApp = renderApp;
+    const baseRenderAdmin = renderAdmin;
+    const baseUpdateAccessControl = updateAccessControl;
+    const baseShowToast = showToast;
+
+    renderApp = function wrappedRenderApp() {
+      mergeManualSalesIntoDashboard();
+      const result = baseRenderApp.apply(this, arguments);
+      renderGrowthFeatures();
+      return result;
+    };
+
+    renderAdmin = function wrappedRenderAdmin() {
+      const result = baseRenderAdmin.apply(this, arguments);
+      renderAdminLogs();
+      return result;
+    };
+
+    updateAccessControl = function wrappedUpdateAccessControl() {
+      const result = baseUpdateAccessControl.apply(this, arguments);
+      syncAccessLanding();
+      maybeOpenOnboarding();
+      hydrateGrowthDataForCurrentUser();
+      applyAppSettings();
+      renderGrowthFeatures();
+      return result;
+    };
+
+    showToast = function wrappedShowToast(message, type) {
+      if (type === "error") {
+        addSystemLog("erro ocorrido", message || "Erro sem detalhes", "error");
+      }
+
+      return baseShowToast.apply(this, arguments);
+    };
+  }
+
+  function registerPwa() {
+    if ("serviceWorker" in navigator && window.location.protocol !== "file:") {
+      navigator.serviceWorker.register("./sw.js").catch((error) => {
+        addSystemLog("erro ocorrido", `Service worker: ${error.message}`, "error");
+      });
+    }
+
+    window.addEventListener("beforeinstallprompt", (event) => {
+      event.preventDefault();
+      state.deferredInstallPrompt = event;
+      const button = document.getElementById("installPwaButton");
+      if (button) button.hidden = false;
+    });
+  }
+
+  function bindGrowthControls() {
+    const landingLoginButton = document.getElementById("landingLoginButton");
+    const landingInviteButton = document.getElementById("landingInviteButton");
+    const reportMonth = document.getElementById("reportMonth");
+    const reportYear = document.getElementById("reportYear");
+    const exportReportCsvButton = document.getElementById("exportReportCsvButton");
+    const goalsForm = document.getElementById("goalsForm");
+    const saveBudgetsButton = document.getElementById("saveBudgetsButton");
+    const exportAllCsvButton = document.getElementById("exportAllCsvButton");
+    const exportBackupJsonButton = document.getElementById("exportBackupJsonButton");
+    const importBackupJsonInput = document.getElementById("importBackupJsonInput");
+    const onboardingConnectGmailButton = document.getElementById("onboardingConnectGmailButton");
+    const installPwaButton = document.getElementById("installPwaButton");
+    const saleForm = document.getElementById("saleForm");
+    const saleCancelEditButton = document.getElementById("saleCancelEditButton");
+    const salesTable = document.getElementById("salesTable");
+    const salesUserFilter = document.getElementById("salesUserFilter");
+    const adminUserFilter = document.getElementById("adminUserFilter");
+    const adminUsersTable = document.getElementById("adminUsersTable");
+    const adminInvitesTable = document.getElementById("adminInvitesTable");
+    const profileSettingsForm = document.getElementById("profileSettingsForm");
+    const settingsConnectGmailButton = document.getElementById("settingsConnectGmailButton");
+    const disconnectGmailButton = document.getElementById("disconnectGmailButton");
+    const clearLocalDataButton = document.getElementById("clearLocalDataButton");
+    const connectOutlookButton = document.getElementById("connectOutlookButton");
+    const settingsOutlookButton = document.getElementById("settingsOutlookButton");
+    const recentTable = document.getElementById("recentTable");
+    const historyTable = document.getElementById("historyTable");
+
+    if (landingLoginButton) landingLoginButton.addEventListener("click", openAccessLogin);
+    if (landingInviteButton) landingInviteButton.addEventListener("click", openAccessLogin);
+    if (reportMonth) reportMonth.addEventListener("change", renderGrowthFeatures);
+    if (reportYear) reportYear.addEventListener("input", renderGrowthFeatures);
+    if (exportReportCsvButton) exportReportCsvButton.addEventListener("click", exportReportCsv);
+    if (goalsForm) goalsForm.addEventListener("submit", saveMonthlyGoals);
+    if (saveBudgetsButton) saveBudgetsButton.addEventListener("click", saveCategoryBudgets);
+    if (exportAllCsvButton) exportAllCsvButton.addEventListener("click", exportAllCsv);
+    if (exportBackupJsonButton) exportBackupJsonButton.addEventListener("click", exportBackupJson);
+    if (importBackupJsonInput) importBackupJsonInput.addEventListener("change", importBackupJson);
+    if (onboardingConnectGmailButton) onboardingConnectGmailButton.addEventListener("click", connectGmailAndSearchPix);
+    if (installPwaButton) installPwaButton.addEventListener("click", promptPwaInstall);
+    if (saleForm) saleForm.addEventListener("submit", handleSaleSubmit);
+    if (saleCancelEditButton) saleCancelEditButton.addEventListener("click", resetSaleForm);
+    if (salesTable) salesTable.addEventListener("click", handleSalesTableClick);
+    if (salesUserFilter) salesUserFilter.addEventListener("change", () => {
+      state.adminUserFilter = salesUserFilter.value || "all";
+      renderGrowthFeatures();
+      renderApp();
+    });
+    if (adminUserFilter) adminUserFilter.addEventListener("change", () => {
+      state.adminUserFilter = adminUserFilter.value || "all";
+      renderGrowthFeatures();
+    });
+    if (adminUsersTable) {
+      adminUsersTable.addEventListener("click", handleAdminUserAction);
+      adminUsersTable.addEventListener("change", handleAdminUserAction);
+    }
+    if (adminInvitesTable) adminInvitesTable.addEventListener("click", handleAdminInviteAction);
+    if (profileSettingsForm) profileSettingsForm.addEventListener("submit", handleProfileSettingsSubmit);
+    if (settingsConnectGmailButton) settingsConnectGmailButton.addEventListener("click", connectGmailAndSearchPix);
+    if (disconnectGmailButton) disconnectGmailButton.addEventListener("click", disconnectGmailFromSettings);
+    if (clearLocalDataButton) clearLocalDataButton.addEventListener("click", clearLocalDataFromSettings);
+    if (connectOutlookButton) connectOutlookButton.addEventListener("click", () => outlookAuth("sidebar"));
+    if (settingsOutlookButton) settingsOutlookButton.addEventListener("click", () => outlookAuth("settings"));
+    if (recentTable) recentTable.addEventListener("click", (event) => handleHistoryDetailsClick(event, "recent"));
+    if (historyTable) historyTable.addEventListener("click", (event) => handleHistoryDetailsClick(event, "history"));
+
+    document.querySelectorAll("[data-mobile-section]").forEach((button) => {
+      button.addEventListener("click", () => setActiveSection(button.dataset.mobileSection));
+    });
+  }
+
+  function populateGrowthMonthControls() {
+    ["reportMonth"].forEach((id) => {
+      const select = document.getElementById(id);
+      if (!select || select.options.length) return;
+
+      MONTHS.forEach((month, index) => {
+        const option = document.createElement("option");
+        option.value = String(index + 1).padStart(2, "0");
+        option.textContent = month;
+        select.appendChild(option);
+      });
+
+      select.value = String(state.month).padStart(2, "0");
+    });
+
+    const reportYear = document.getElementById("reportYear");
+    if (reportYear) reportYear.value = state.year;
+  }
+
+  function openAccessLogin() {
+    const gate = document.getElementById("accessGate");
+    if (!gate) return;
+
+    gate.dataset.loginOpen = "true";
+    gate.classList.add("login-mode");
+    window.setTimeout(() => {
+      const email = document.getElementById("systemLoginEmail");
+      if (email && !email.readOnly) email.focus();
+    }, 60);
+  }
+
+  function syncAccessLanding() {
+    const gate = document.getElementById("accessGate");
+    if (!gate || state.accessGranted) return;
+
+    const hasInvite = typeof getInviteTokenFromUrl === "function" && Boolean(getInviteTokenFromUrl());
+    if (hasInvite || gate.dataset.loginOpen === "true") {
+      gate.classList.add("login-mode");
+    } else {
+      gate.classList.remove("login-mode");
+    }
+  }
+
+  function maybeOpenOnboarding() {
+    if (!state.accessGranted || state.onboardingChecked || isAdminUser()) return;
+
+    const hasGmailData = state.gmailConnected || state.gmailPixTransactions.length || loadGmailSessionData();
+    state.onboardingChecked = true;
+
+    if (!hasGmailData) {
+      activateGrowthSection("onboarding");
+    }
+  }
+
+  function activateGrowthSection(sectionId) {
+    document.querySelectorAll(".view").forEach((view) => {
+      view.classList.toggle("active-view", view.id === sectionId);
+    });
+
+    document.querySelectorAll(".nav-link[data-section]").forEach((link) => {
+      link.classList.toggle("active", link.dataset.section === sectionId);
+    });
+
+    const sectionTitle = document.querySelector(`#${sectionId} h2`);
+    if (dom.pageTitle && sectionTitle) {
+      dom.pageTitle.textContent = sectionTitle.textContent;
+    }
+
+    createIcons();
+  }
+
+  async function promptPwaInstall() {
+    if (!state.deferredInstallPrompt) {
+      showToast("Instalação disponível quando o navegador liberar o app.", "error");
+      return;
+    }
+
+    state.deferredInstallPrompt.prompt();
+    await state.deferredInstallPrompt.userChoice.catch(() => null);
+    state.deferredInstallPrompt = null;
+
+    const button = document.getElementById("installPwaButton");
+    if (button) button.hidden = true;
+  }
+
+  function renderGrowthFeatures() {
+    renderSales();
+    renderAiAnalysis();
+    renderReports();
+    renderGoals();
+    renderBudgetSettings();
+    renderBudgetAlerts();
+    renderOnboarding();
+    renderSettingsExtras();
+    renderAdminSummary();
+    renderProductionChecklist();
+    renderAdminLogs();
+    renderMobileTabbar();
+    renderOutlookState();
+    createIcons();
+  }
+
+  function getReportPeriod() {
+    const month = Number(document.getElementById("reportMonth")?.value || state.month);
+    const year = Number(document.getElementById("reportYear")?.value || state.year);
+
+    return {
+      month: Number.isFinite(month) && month > 0 ? month : state.month,
+      year: Number.isFinite(year) && year > 0 ? year : state.year
+    };
+  }
+
+  function hydrateGrowthDataForCurrentUser() {
+    if (!state.systemUser || !state.accessGranted) return;
+
+    const key = `${normalizeEmail(state.systemUser.email)}:${canUseFirestore() ? "firestore" : "local"}`;
+    if (state.growthHydrating || state.growthDataLoadedFor === key) return;
+
+    state.growthDataLoadedFor = key;
+    state.manualSales = loadSalesFromLocal(state.systemUser.email);
+    state.allSales = isAdminUser() ? loadAllSalesFromLocal() : state.manualSales.slice();
+    state.appSettings = loadSettingsFromLocal(state.systemUser.email);
+    state.userSettings = isAdminUser() ? loadAllSettingsFromLocal() : { [normalizeEmail(state.systemUser.email)]: state.appSettings };
+    applyAppSettings();
+
+    if (!canUseFirestore()) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore indisponível. Usando fallback local para vendas/configurações.`);
+      renderApp();
+      return;
+    }
+
+    state.growthHydrating = true;
+    Promise.all([
+      hydrateSettingsFromFirestore(),
+      isAdminUser() ? hydrateAllSettingsFromFirestore() : Promise.resolve(false),
+      hydrateSalesFromFirestore()
+    ]).catch((error) => {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Falha ao carregar vendas/configurações do Firestore. Fallback local mantido.`, error);
+    }).finally(() => {
+      state.growthHydrating = false;
+      mergeManualSalesIntoDashboard();
+      renderApp();
+    });
+  }
+
+  function getSalesStorageKey(email = state.systemUser && state.systemUser.email) {
+    const normalized = normalizeEmail(email);
+    return normalized ? `${SALES_STORAGE_PREFIX}${normalized}` : "";
+  }
+
+  function getSettingsStorageKey(email = state.systemUser && state.systemUser.email) {
+    const normalized = normalizeEmail(email);
+    return normalized ? `${SETTINGS_STORAGE_PREFIX}${normalized}` : "";
+  }
+
+  function loadSalesFromLocal(email = state.systemUser && state.systemUser.email) {
+    const key = getSalesStorageKey(email);
+    if (!key) return [];
+
+    try {
+      const sales = JSON.parse(window.localStorage.getItem(key) || "[]");
+      return Array.isArray(sales) ? sales.map((sale) => normalizeSale(sale, email)).filter((sale) => sale.id) : [];
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar vendas locais.`, error);
+      return [];
+    }
+  }
+
+  function loadAllSalesFromLocal() {
+    const sales = [];
+
+    try {
+      Object.keys(window.localStorage)
+        .filter((key) => key.startsWith(SALES_STORAGE_PREFIX))
+        .forEach((key) => {
+          const email = key.slice(SALES_STORAGE_PREFIX.length);
+          sales.push(...loadSalesFromLocal(email));
+        });
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar todas as vendas locais.`, error);
+    }
+
+    return dedupeSales(sales);
+  }
+
+  function saveSalesToLocal(email, sales) {
+    const key = getSalesStorageKey(email);
+    if (!key) return false;
+
+    try {
+      window.localStorage.setItem(key, JSON.stringify(dedupeSales(sales)));
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar vendas locais.`, error);
+      return false;
+    }
+  }
+
+  function loadSettingsFromLocal(email = state.systemUser && state.systemUser.email) {
+    const key = getSettingsStorageKey(email);
+    const fallback = normalizeAppSettings({ email });
+    if (!key) return fallback;
+
+    try {
+      return normalizeAppSettings(JSON.parse(window.localStorage.getItem(key) || "null") || fallback);
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar configurações locais.`, error);
+      return fallback;
+    }
+  }
+
+  function loadAllSettingsFromLocal() {
+    const settings = {};
+
+    try {
+      Object.keys(window.localStorage)
+        .filter((key) => key.startsWith(SETTINGS_STORAGE_PREFIX))
+        .forEach((key) => {
+          const email = key.slice(SETTINGS_STORAGE_PREFIX.length);
+          settings[normalizeEmail(email)] = loadSettingsFromLocal(email);
+        });
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar settings locais de usuários.`, error);
+    }
+
+    return settings;
+  }
+
+  function saveSettingsToLocal(settings = state.appSettings) {
+    const normalized = normalizeAppSettings(settings);
+    const key = getSettingsStorageKey(normalized.email);
+    if (!key) return false;
+
+    try {
+      window.localStorage.setItem(key, JSON.stringify(normalized));
+      state.userSettings = {
+        ...(state.userSettings || {}),
+        [normalizeEmail(normalized.email)]: normalized
+      };
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar configurações locais.`, error);
+      return false;
+    }
+  }
+
+  async function hydrateSalesFromFirestore() {
+    if (!canUseFirestore() || !state.systemUser) return false;
+
+    const emails = isAdminUser()
+      ? Array.from(new Set(USERS.map((user) => normalizeEmail(user.email)).filter(Boolean)))
+      : [normalizeEmail(state.systemUser.email)];
+    const allSales = [];
+
+    for (const email of emails) {
+      try {
+        const snapshot = await state.firestoreDb.collection("sales").doc(email).collection("items").get();
+        const sales = [];
+        snapshot.forEach((doc) => {
+          sales.push(normalizeSale({ id: doc.id, ...doc.data() }, email));
+        });
+        if (sales.length) saveSalesToLocal(email, sales);
+        allSales.push(...sales);
+      } catch (error) {
+        console.warn(`${FINANCEIRO_LOG_PREFIX} Falha ao carregar vendas de ${email}.`, error);
+        allSales.push(...loadSalesFromLocal(email));
+      }
+    }
+
+    state.allSales = dedupeSales(allSales);
+    state.manualSales = state.allSales.filter((sale) => normalizeEmail(sale.ownerEmail) === normalizeEmail(state.systemUser.email));
+    return true;
+  }
+
+  async function saveSaleToFirestore(sale) {
+    if (!canUseFirestore()) return false;
+
+    try {
+      const normalized = normalizeSale(sale);
+      await state.firestoreDb
+        .collection("sales")
+        .doc(normalizeEmail(normalized.ownerEmail))
+        .collection("items")
+        .doc(normalized.id)
+        .set(normalized, { merge: true });
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore falhou ao salvar venda. Fallback local mantido.`, error);
+      return false;
+    }
+  }
+
+  async function deleteSaleFromFirestore(sale) {
+    if (!canUseFirestore()) return false;
+
+    try {
+      await state.firestoreDb
+        .collection("sales")
+        .doc(normalizeEmail(sale.ownerEmail))
+        .collection("items")
+        .doc(sale.id)
+        .delete();
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore falhou ao excluir venda. Fallback local atualizado.`, error);
+      return false;
+    }
+  }
+
+  async function hydrateSettingsFromFirestore() {
+    if (!canUseFirestore() || !state.systemUser) return false;
+
+    try {
+      const doc = await state.firestoreDb.collection("settings").doc(normalizeEmail(state.systemUser.email)).get();
+      if (doc.exists) {
+        state.appSettings = normalizeAppSettings({ ...doc.data(), email: state.systemUser.email });
+        saveSettingsToLocal(state.appSettings);
+        applyAppSettings();
+      } else {
+        await saveSettingsToFirestore(state.appSettings || normalizeAppSettings({ email: state.systemUser.email }));
+      }
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore falhou ao carregar configurações. Fallback local mantido.`, error);
+      return false;
+    }
+  }
+
+  async function hydrateAllSettingsFromFirestore() {
+    if (!canUseFirestore() || !isAdminUser()) return false;
+
+    const settings = { ...state.userSettings };
+
+    for (const user of USERS) {
+      const email = normalizeEmail(user.email);
+      if (!email) continue;
+      try {
+        const doc = await state.firestoreDb.collection("settings").doc(email).get();
+        if (doc.exists) {
+          settings[email] = normalizeAppSettings({ ...doc.data(), email });
+          saveSettingsToLocal(settings[email]);
+        }
+      } catch (error) {
+        console.warn(`${FINANCEIRO_LOG_PREFIX} Falha ao carregar settings de ${email}.`, error);
+      }
+    }
+
+    state.userSettings = settings;
+    return true;
+  }
+
+  async function saveSettingsToFirestore(settings = state.appSettings) {
+    if (!canUseFirestore()) return false;
+
+    try {
+      const normalized = normalizeAppSettings(settings);
+      const email = normalizeEmail(normalized.email);
+      if (!email) return false;
+      await state.firestoreDb.collection("settings").doc(email).set(normalized, { merge: true });
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Firestore falhou ao salvar configurações. Fallback local mantido.`, error);
+      return false;
+    }
+  }
+
+  function normalizeSale(sale, fallbackEmail = state.systemUser && state.systemUser.email) {
+    const ownerEmail = normalizeEmail(sale && (sale.ownerEmail || sale.email || fallbackEmail));
+    const id = safeGrowthText(sale && sale.id, `sale_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`);
+    const createdAt = safeGrowthText(sale && sale.createdAt, new Date().toISOString());
+
+    return {
+      id,
+      ownerEmail,
+      cliente: safeGrowthText(sale && sale.cliente, ""),
+      produtoServico: safeGrowthText(sale && (sale.produtoServico || sale.produto || sale.servico), ""),
+      valor: Math.max(0, Number(sale && sale.valor) || 0),
+      formaPagamento: safeGrowthText(sale && sale.formaPagamento, "Pix"),
+      data: safeGrowthText(sale && sale.data, new Date().toISOString().slice(0, 10)),
+      categoria: safeGrowthText(sale && sale.categoria, "Serviços"),
+      observacao: safeGrowthText(sale && (sale.observacao || sale.observação), ""),
+      origem: "venda_manual",
+      createdAt,
+      updatedAt: safeGrowthText(sale && sale.updatedAt, createdAt)
+    };
+  }
+
+  function dedupeSales(sales) {
+    const map = new Map();
+    (Array.isArray(sales) ? sales : []).forEach((sale) => {
+      const normalized = normalizeSale(sale);
+      if (normalized.id && normalized.ownerEmail) {
+        map.set(`${normalized.ownerEmail}:${normalized.id}`, normalized);
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => (parseGrowthDate(b.data)?.getTime() || 0) - (parseGrowthDate(a.data)?.getTime() || 0));
+  }
+
+  function getVisibleSales() {
+    const currentEmail = normalizeEmail(state.systemUser && state.systemUser.email);
+    const filter = isAdminUser() ? state.adminUserFilter || "all" : currentEmail;
+    const source = isAdminUser() ? state.allSales : state.manualSales;
+
+    return dedupeSales(source).filter((sale) => {
+      if (!isAdminUser()) return normalizeEmail(sale.ownerEmail) === currentEmail;
+      return filter === "all" || normalizeEmail(sale.ownerEmail) === normalizeEmail(filter);
+    });
+  }
+
+  function getSalesForCurrentPeriod() {
+    return getVisibleSales().filter((sale) => {
+      const date = parseGrowthDate(sale.data);
+      return date && date.getMonth() + 1 === state.month && date.getFullYear() === state.year;
+    });
+  }
+
+  function saleToEntrada(sale) {
+    return {
+      id: sale.id,
+      tipo: "entrada",
+      nome: sale.cliente,
+      remetente: sale.cliente,
+      valor: sale.valor,
+      data: sale.data,
+      categoria: sale.categoria,
+      descricao: sale.produtoServico,
+      origem: "venda_manual",
+      observacao: sale.observacao,
+      ownerEmail: sale.ownerEmail,
+      raw: clonePlainObject(sale)
+    };
+  }
+
+  function saleToHistory(sale) {
+    return {
+      id: sale.id,
+      tipo: "entrada",
+      nome: sale.cliente,
+      valor: sale.valor,
+      data: sale.data,
+      categoria: sale.categoria,
+      descricao: sale.produtoServico,
+      origem: "venda_manual",
+      observacao: sale.observacao,
+      ownerEmail: sale.ownerEmail,
+      raw: clonePlainObject(sale)
+    };
+  }
+
+  function mergeManualSalesIntoDashboard() {
+    if (!state.data) return;
+
+    const sales = getSalesForCurrentPeriod();
+    const salesEntradas = sales.map(saleToEntrada);
+    const salesHistorico = sales.map(saleToHistory);
+
+    state.data.entradas = [
+      ...(Array.isArray(state.data.entradas) ? state.data.entradas : []).filter((item) => item.origem !== "venda_manual"),
+      ...salesEntradas
+    ].sort(sortTransactionByDateDesc);
+
+    state.data.historico = [
+      ...(Array.isArray(state.data.historico) ? state.data.historico : []).filter((item) => item.origem !== "venda_manual"),
+      ...salesHistorico
+    ].sort(sortTransactionByDateDesc);
+
+    const recebido = sumValues(state.data.entradas);
+    const gasto = sumValues(state.data.saidas);
+    const qtdEntradas = state.data.entradas.length;
+    const qtdSaidas = state.data.saidas.length;
+    const totalMovements = qtdEntradas + qtdSaidas;
+
+    state.data.dashboard.recebido = recebido;
+    state.data.dashboard.gasto = gasto;
+    state.data.dashboard.saldo = recebido - gasto;
+    state.data.dashboard.qtdEntradas = qtdEntradas;
+    state.data.dashboard.qtdSaidas = qtdSaidas;
+    state.data.dashboard.ticketMedio = totalMovements ? (recebido + gasto) / totalMovements : 0;
+    state.data.dashboard.maiorEntrada = Math.max(0, ...state.data.entradas.map((item) => Number(item.valor) || 0));
+    state.data.dashboard.maiorGasto = Math.max(0, ...state.data.saidas.map((item) => Number(item.valor) || 0));
+  }
+
+  function sortTransactionByDateDesc(a, b) {
+    return (parseGrowthDate(b.data)?.getTime() || 0) - (parseGrowthDate(a.data)?.getTime() || 0);
+  }
+
+  function getActiveTransactions() {
+    const data = state.data || {};
+    const entradas = Array.isArray(data.entradas) ? data.entradas : [];
+    const saidas = Array.isArray(data.saidas) ? data.saidas : [];
+
+    return [
+      ...entradas.map((item) => normalizeGrowthTransaction(item, "recebido")),
+      ...saidas.map((item) => normalizeGrowthTransaction(item, "enviado"))
+    ].filter((item) => item.valor > 0);
+  }
+
+  function normalizeGrowthTransaction(item, type) {
+    const raw = item || {};
+    const nome = raw.nome || raw.remetente || raw.quemEnviou || raw.destino || raw.descricao || "Transação Pix";
+
+    return {
+      id: raw.id || raw.gmailMessageId || raw.emailId || raw.hash || "",
+      tipo: type,
+      data: raw.data || raw.date || "",
+      nome: safeGrowthText(nome, "Transação Pix"),
+      categoria: safeGrowthText(raw.categoria || raw.category, type === "recebido" ? "Receita" : "Outros"),
+      valor: Math.abs(Number(raw.valor || raw.value || 0)),
+      descricao: safeGrowthText(raw.descricao || raw.description, ""),
+      origem: safeGrowthText(raw.origem, type === "recebido" ? "api" : "api"),
+      banco: safeGrowthText(raw.banco, ""),
+      gmailMessageId: safeGrowthText(raw.gmailMessageId || raw.emailId, ""),
+      hash: safeGrowthText(raw.hash, ""),
+      observacao: safeGrowthText(raw.observacao || raw.observação, ""),
+      ownerEmail: safeGrowthText(raw.ownerEmail, ""),
+      raw
+    };
+  }
+
+  function getFilteredTransactions(month, year) {
+    return getActiveTransactions().filter((transaction) => {
+      const date = parseGrowthDate(transaction.data);
+      return date && date.getMonth() + 1 === month && date.getFullYear() === year;
+    });
+  }
+
+  function calculateReport(month, year) {
+    const transactions = getFilteredTransactions(month, year);
+    const received = transactions.filter((item) => item.tipo === "recebido");
+    const sent = transactions.filter((item) => item.tipo === "enviado");
+    const income = sumGrowthValues(received);
+    const expense = sumGrowthValues(sent);
+    const categoryMap = new Map();
+
+    sent.forEach((item) => {
+      const key = normalizeGrowthCategory(item.categoria);
+      const current = categoryMap.get(key) || { count: 0, total: 0 };
+      current.count += 1;
+      current.total += item.valor;
+      categoryMap.set(key, current);
+    });
+
+    const topCategory = Array.from(categoryMap.entries()).sort((a, b) => {
+      if (b[1].count !== a[1].count) return b[1].count - a[1].count;
+      return b[1].total - a[1].total;
+    })[0];
+
+    const biggestExpense = sent.slice().sort((a, b) => b.valor - a.valor)[0] || null;
+
+    return {
+      month,
+      year,
+      transactions,
+      received,
+      sent,
+      income,
+      expense,
+      balance: income - expense,
+      biggestExpense,
+      topCategory,
+      categoryMap
+    };
+  }
+
+  function renderSales() {
+    const table = document.getElementById("salesTable");
+    if (!table) return;
+
+    populateUserFilters();
+    const sales = getVisibleSales();
+    const currentPeriodSales = getSalesForCurrentPeriod();
+    const total = sumGrowthValues(currentPeriodSales.map((sale) => ({ valor: sale.valor })));
+
+    setText("salesTotalPill", formatGrowthCurrency(total));
+    setText("salesCountLabel", `${sales.length} ${sales.length === 1 ? "venda registrada" : "vendas registradas"}`);
+
+    if (!sales.length) {
+      table.innerHTML = `<tr><td colspan="6">Nenhuma venda registrada ainda.</td></tr>`;
+      return;
+    }
+
+    table.innerHTML = sales.map((sale) => `
+      <tr class="clickable-row" data-sale-id="${escapeGrowthHtml(sale.id)}" data-sale-owner="${escapeGrowthHtml(sale.ownerEmail)}">
+        <td data-label="Data">${escapeGrowthHtml(formatSaleDate(sale.data))}</td>
+        <td data-label="Cliente" class="name-cell"><button class="name-button" type="button" data-sale-action="details">${escapeGrowthHtml(sale.cliente)}</button></td>
+        <td data-label="Produto/Serviço">${escapeGrowthHtml(sale.produtoServico)}</td>
+        <td data-label="Categoria"><span class="tag">${escapeGrowthHtml(sale.categoria)}</span></td>
+        <td data-label="Valor" class="align-right amount entrada">+ ${formatGrowthCurrency(sale.valor)}</td>
+        <td data-label="Ações">
+          <div class="row-actions">
+            <button class="mini-action" type="button" data-sale-action="edit" title="Editar venda"><i data-lucide="pencil"></i></button>
+            <button class="mini-action danger-action" type="button" data-sale-action="delete" title="Excluir venda"><i data-lucide="trash-2"></i></button>
+          </div>
+        </td>
+      </tr>
+    `).join("");
+  }
+
+  function handleHistoryDetailsClick(event, source) {
+    const row = event.target.closest("[data-history-index]");
+    if (!row) return;
+
+    const collection = source === "recent" ? state.recentHistoryRows : state.visibleHistoryRows;
+    const transaction = Array.isArray(collection) ? collection[Number(row.dataset.historyIndex)] : null;
+    if (!transaction) return;
+
+    state.pixDetailsModal.open(transaction);
+  }
+
+  function handleSaleSubmit(event) {
+    event.preventDefault();
+
+    if (!state.systemUser) {
+      showToast("Entre no sistema antes de lançar uma venda.", "error");
+      return;
+    }
+
+    const id = safeGrowthText(document.getElementById("saleIdInput")?.value, "");
+    const ownerEmail = id
+      ? (findSaleById(id)?.ownerEmail || state.systemUser.email)
+      : state.systemUser.email;
+    const sale = normalizeSale({
+      id: id || `sale_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      ownerEmail,
+      cliente: document.getElementById("saleClientInput")?.value,
+      produtoServico: document.getElementById("saleProductInput")?.value,
+      valor: document.getElementById("saleValueInput")?.value,
+      formaPagamento: document.getElementById("salePaymentInput")?.value,
+      data: document.getElementById("saleDateInput")?.value,
+      categoria: document.getElementById("saleCategoryInput")?.value,
+      observacao: document.getElementById("saleObservationInput")?.value,
+      createdAt: findSaleById(id)?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    if (!sale.cliente || !sale.produtoServico || !sale.valor || !sale.data) {
+      showToast("Preencha cliente, produto, valor e data da venda.", "error");
+      return;
+    }
+
+    upsertSaleInState(sale);
+    saveSalesToLocal(sale.ownerEmail, state.allSales.filter((item) => normalizeEmail(item.ownerEmail) === normalizeEmail(sale.ownerEmail)));
+    saveSaleToFirestore(sale);
+    mergeManualSalesIntoDashboard();
+    resetSaleForm();
+    renderApp();
+    addSystemLog(id ? "venda editada" : "venda criada", `${sale.cliente} - ${formatGrowthCurrency(sale.valor)}`);
+    showToast(id ? "Venda atualizada." : "Venda lançada como receita.");
+  }
+
+  function handleSalesTableClick(event) {
+    const row = event.target.closest("[data-sale-id]");
+    if (!row) return;
+
+    const action = event.target.closest("[data-sale-action]")?.dataset.saleAction || "details";
+    const sale = findSaleById(row.dataset.saleId, row.dataset.saleOwner);
+    if (!sale) return;
+
+    if (action === "edit") {
+      fillSaleForm(sale);
+      return;
+    }
+
+    if (action === "delete") {
+      deleteSale(sale);
+      return;
+    }
+
+    state.pixDetailsModal.open(saleToHistory(sale));
+  }
+
+  function fillSaleForm(sale) {
+    document.getElementById("saleIdInput").value = sale.id;
+    document.getElementById("saleClientInput").value = sale.cliente;
+    document.getElementById("saleProductInput").value = sale.produtoServico;
+    document.getElementById("saleValueInput").value = sale.valor;
+    document.getElementById("salePaymentInput").value = sale.formaPagamento;
+    document.getElementById("saleDateInput").value = sale.data;
+    document.getElementById("saleCategoryInput").value = sale.categoria;
+    document.getElementById("saleObservationInput").value = sale.observacao;
+    setText("saleFormTitle", "Editar venda");
+    setText("saleSubmitLabel", "Atualizar venda");
+    const cancel = document.getElementById("saleCancelEditButton");
+    if (cancel) cancel.hidden = false;
+    setActiveSection("vendas");
+  }
+
+  function resetSaleForm() {
+    const form = document.getElementById("saleForm");
+    if (form) form.reset();
+    const today = new Date().toISOString().slice(0, 10);
+    const dateInput = document.getElementById("saleDateInput");
+    if (dateInput) dateInput.value = today;
+    document.getElementById("saleIdInput").value = "";
+    setText("saleFormTitle", "Lançar venda");
+    setText("saleSubmitLabel", "Salvar venda");
+    const cancel = document.getElementById("saleCancelEditButton");
+    if (cancel) cancel.hidden = true;
+  }
+
+  function upsertSaleInState(sale) {
+    state.allSales = dedupeSales([
+      ...state.allSales.filter((item) => !(item.id === sale.id && normalizeEmail(item.ownerEmail) === normalizeEmail(sale.ownerEmail))),
+      sale
+    ]);
+    state.manualSales = state.allSales.filter((item) => normalizeEmail(item.ownerEmail) === normalizeEmail(state.systemUser && state.systemUser.email));
+  }
+
+  function findSaleById(id, ownerEmail = "") {
+    const normalizedOwner = normalizeEmail(ownerEmail);
+    return state.allSales.find((sale) => sale.id === id && (!normalizedOwner || normalizeEmail(sale.ownerEmail) === normalizedOwner))
+      || state.manualSales.find((sale) => sale.id === id);
+  }
+
+  function deleteSale(sale) {
+    const confirmed = window.confirm(`Excluir a venda de ${sale.cliente}?`);
+    if (!confirmed) return;
+
+    state.allSales = state.allSales.filter((item) => !(item.id === sale.id && normalizeEmail(item.ownerEmail) === normalizeEmail(sale.ownerEmail)));
+    state.manualSales = state.manualSales.filter((item) => item.id !== sale.id);
+    saveSalesToLocal(sale.ownerEmail, state.allSales.filter((item) => normalizeEmail(item.ownerEmail) === normalizeEmail(sale.ownerEmail)));
+    deleteSaleFromFirestore(sale);
+    mergeManualSalesIntoDashboard();
+    renderApp();
+    addSystemLog("venda excluída", `${sale.cliente} - ${formatGrowthCurrency(sale.valor)}`);
+    showToast("Venda excluída.");
+  }
+
+  function formatSaleDate(value) {
+    const date = parseGrowthDate(value);
+    if (!date) return safeGrowthText(value, "--");
+    return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+  }
+
+  function populateUserFilters() {
+    const selects = [
+      document.getElementById("salesUserFilter"),
+      document.getElementById("adminUserFilter")
+    ].filter(Boolean);
+    const options = [`<option value="all">Todos usuários</option>`]
+      .concat(USERS.map((user) => `<option value="${escapeGrowthHtml(normalizeEmail(user.email))}">${escapeGrowthHtml(user.name || user.email)}</option>`));
+
+    selects.forEach((select) => {
+      const current = select.value || state.adminUserFilter || "all";
+      select.hidden = !isAdminUser();
+      if (select.parentElement) select.parentElement.hidden = !isAdminUser();
+      select.innerHTML = options.join("");
+      select.value = Array.from(select.options).some((option) => option.value === current) ? current : "all";
+    });
+  }
+
+  function renderAdminSummary() {
+    const grid = document.getElementById("adminSummaryGrid");
+    if (!grid) return;
+
+    if (!isAdminUser()) {
+      grid.innerHTML = "";
+      return;
+    }
+
+    const pendingInvites = INVITES.filter((invite) => invite.status === "active" && !invite.usedAt).length;
+    const usedInvites = INVITES.filter((invite) => invite.usedAt || invite.status === "used").length;
+    const totalTransactions = (state.data.entradas.length || 0) + (state.data.saidas.length || 0);
+    const totalSales = state.allSales.length;
+
+    grid.innerHTML = [
+      ["Usuários", USERS.length, "users"],
+      ["Convites pendentes", pendingInvites, "ticket"],
+      ["Convites usados", usedInvites, "ticket-check"],
+      ["Transações", totalTransactions, "receipt-text"],
+      ["Vendas", totalSales, "shopping-bag"]
+    ].map(([label, value, icon]) => `
+      <article class="admin-summary-card">
+        <i data-lucide="${icon}"></i>
+        <span>${label}</span>
+        <strong>${formatNumber(value)}</strong>
+      </article>
+    `).join("");
+  }
+
+  function handleAdminUserAction(event) {
+    const row = event.target.closest("[data-admin-user-email]");
+    if (!row || !isAdminUser()) return;
+
+    const email = normalizeEmail(row.dataset.adminUserEmail);
+    const user = USERS.find((item) => normalizeEmail(item.email) === email);
+    if (!user) return;
+
+    const roleSelect = event.target.closest("[data-admin-role]");
+    if (roleSelect) {
+      user.role = roleSelect.value === "admin" ? "admin" : "user";
+      saveUsers();
+      saveUserToFirestore(user);
+      renderAdmin();
+      addSystemLog("role editada", `${user.email} agora é ${user.role}`);
+      return;
+    }
+
+    const action = event.target.closest("[data-admin-user-action]")?.dataset.adminUserAction;
+    if (action === "toggle-block") {
+      user.blocked = !user.blocked;
+      saveUsers();
+      saveUserToFirestore(user);
+      renderAdmin();
+      addSystemLog(user.blocked ? "usuário bloqueado" : "usuário desbloqueado", user.email);
+      showToast(user.blocked ? "Usuário bloqueado." : "Usuário desbloqueado.");
+    }
+  }
+
+  function handleAdminInviteAction(event) {
+    const row = event.target.closest("[data-admin-invite-token]");
+    if (!row || !isAdminUser()) return;
+
+    const invite = INVITES.find((item) => item.token === row.dataset.adminInviteToken);
+    if (!invite) return;
+
+    const action = event.target.closest("[data-admin-invite-action]")?.dataset.adminInviteAction;
+    if (action === "copy") {
+      const link = buildInviteLink(invite.token);
+      navigator.clipboard?.writeText(link).then(() => showToast("Convite copiado.")).catch(() => {
+        dom.adminInviteLink.value = link;
+        showToast("Link colocado no campo de convite para copiar.");
+      });
+      return;
+    }
+
+    if (action === "cancel") {
+      invite.status = "canceled";
+      saveInvites();
+      saveInviteToFirestore(invite);
+      renderAdmin();
+      addSystemLog("convite cancelado", invite.email);
+      showToast("Convite cancelado.");
+    }
+  }
+
+  function normalizeAppSettings(settings) {
+    const email = normalizeEmail(settings && (settings.email || state.systemUser && state.systemUser.email));
+
+    return {
+      email,
+      name: safeGrowthText(settings && settings.name, state.systemUser && state.systemUser.name || ""),
+      theme: safeGrowthText(settings && settings.theme, "dark") === "light" ? "light" : "dark",
+      gmailConnected: Boolean(settings && settings.gmailConnected),
+      gmailEmail: safeGrowthText(settings && settings.gmailEmail, state.gmailEmail || ""),
+      gmailConnectedAt: safeGrowthText(settings && settings.gmailConnectedAt, state.gmailConnectedAt || ""),
+      blocked: Boolean(settings && settings.blocked),
+      updatedAt: safeGrowthText(settings && settings.updatedAt, new Date().toISOString())
+    };
+  }
+
+  function applyAppSettings() {
+    const settings = state.appSettings || normalizeAppSettings({});
+    document.documentElement.dataset.theme = settings.theme || "dark";
+    document.body.dataset.theme = settings.theme || "dark";
+
+    const profileName = document.getElementById("profileNameInput");
+    const themeSelect = document.getElementById("themeSelect");
+    if (profileName && document.activeElement !== profileName) profileName.value = settings.name || state.systemUser?.name || "";
+    if (themeSelect) themeSelect.value = settings.theme || "dark";
+  }
+
+  async function handleProfileSettingsSubmit(event) {
+    event.preventDefault();
+    if (!state.systemUser) return;
+
+    const name = safeGrowthText(document.getElementById("profileNameInput")?.value, state.systemUser.name);
+    const password = safeGrowthText(document.getElementById("profilePasswordInput")?.value, "");
+    const theme = document.getElementById("themeSelect")?.value === "light" ? "light" : "dark";
+    const user = USERS.find((item) => normalizeEmail(item.email) === normalizeEmail(state.systemUser.email));
+
+    if (user) {
+      user.name = name;
+      if (password) user.password = password;
+      saveUsers();
+      saveUserToFirestore(user);
+    }
+
+    state.systemUser.name = name;
+    saveSystemSession(state.systemUser);
+    state.appSettings = normalizeAppSettings({
+      ...(state.appSettings || {}),
+      email: state.systemUser.email,
+      name,
+      theme,
+      gmailConnected: state.gmailConnected,
+      gmailEmail: state.gmailEmail,
+      gmailConnectedAt: state.gmailConnectedAt,
+      updatedAt: new Date().toISOString()
+    });
+    saveSettingsToLocal(state.appSettings);
+    saveSettingsToFirestore(state.appSettings);
+    applyAppSettings();
+    renderSystemSession();
+    renderSettingsExtras();
+    addSystemLog("configurações atualizadas", state.systemUser.email);
+    showToast("Configurações salvas.");
+    const passwordInput = document.getElementById("profilePasswordInput");
+    if (passwordInput) passwordInput.value = "";
+  }
+
+  function renderSettingsExtras() {
+    const status = document.getElementById("settingsGmailStatus");
+    const email = document.getElementById("settingsGmailEmail");
+    if (status) status.textContent = state.gmailConnected ? "Conectado" : "Desconectado";
+    if (email) email.textContent = state.gmailEmail || "--";
+    applyAppSettings();
+  }
+
+  function disconnectGmailFromSettings() {
+    clearGmailConnection({ clearData: false, clearStored: true });
+    state.gmailAccessToken = "";
+    state.gmailConnected = false;
+    state.gmailSessionExpired = false;
+    state.appSettings = normalizeAppSettings({
+      ...(state.appSettings || {}),
+      gmailConnected: false,
+      gmailEmail: "",
+      gmailConnectedAt: "",
+      updatedAt: new Date().toISOString()
+    });
+    saveSettingsToLocal(state.appSettings);
+    saveSettingsToFirestore(state.appSettings);
+    renderAuthPanel();
+    renderSettingsExtras();
+    addSystemLog("Gmail desconectado", state.systemUser && state.systemUser.email || "");
+    showToast("Gmail desconectado deste navegador.");
+  }
+
+  function clearLocalDataFromSettings() {
+    const confirmed = window.confirm("Limpar dados locais deste navegador? Firestore e API não serão apagados.");
+    if (!confirmed) return;
+
+    const keepSession = window.localStorage.getItem(SYSTEM_SESSION_KEY);
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith("financeiroAutomatico"))
+      .forEach((key) => window.localStorage.removeItem(key));
+    if (keepSession) window.localStorage.setItem(SYSTEM_SESSION_KEY, keepSession);
+    state.manualSales = [];
+    state.allSales = [];
+    addSystemLog("dados locais limpos", state.systemUser && state.systemUser.email || "");
+    showToast("Dados locais limpos.");
+    renderApp();
+  }
+
+  function renderAiAnalysis() {
+    const grid = document.getElementById("aiInsightsGrid");
+    if (!grid) return;
+
+    const report = calculateReport(state.month, state.year);
+    const insights = buildAiInsights(report);
+    setText("aiSummaryPill", `${insights.length} insights`);
+
+    grid.innerHTML = insights.length
+      ? insights.map((insight) => `
+        <article class="ai-card ${escapeGrowthHtml(insight.kind)}">
+          <div class="ai-card-icon"><i data-lucide="${escapeGrowthHtml(insight.icon)}"></i></div>
+          <span>${escapeGrowthHtml(insight.label)}</span>
+          <h3>${escapeGrowthHtml(insight.title)}</h3>
+          <p>${escapeGrowthHtml(insight.text)}</p>
+        </article>
+      `).join("")
+      : `<article class="panel empty-state-card"><h3>Sem dados suficientes</h3><p>Conecte o Gmail ou lance vendas para gerar análises.</p></article>`;
+  }
+
+  function buildAiInsights(report) {
+    const insights = [];
+    const expense = report.expense;
+    const income = report.income;
+    const sentCount = report.sent.length;
+    const avgTicket = sentCount ? expense / sentCount : 0;
+    const smallOutflows = report.sent.filter((item) => item.valor > 0 && item.valor <= 35).length;
+
+    insights.push({
+      kind: "summary",
+      icon: "sparkles",
+      label: "Resumo do mês",
+      title: `${MONTHS[state.month - 1]} de ${state.year}`,
+      text: `Você recebeu ${formatGrowthCurrency(income)} e gastou ${formatGrowthCurrency(expense)}. Saldo: ${formatGrowthCurrency(report.balance)}.`
+    });
+
+    if (report.balance < 0) {
+      insights.push({
+        kind: "alert",
+        icon: "triangle-alert",
+        label: "Alerta",
+        title: "Você gastou mais do que recebeu",
+        text: "Seu saldo ficou negativo neste período. Revise as maiores despesas antes de assumir novos compromissos."
+      });
+    }
+
+    if (report.topCategory) {
+      const [category, data] = report.topCategory;
+      const percent = expense ? Math.round((data.total / expense) * 100) : 0;
+      insights.push({
+        kind: percent >= 35 ? "alert" : "suggestion",
+        icon: "tags",
+        label: percent >= 35 ? "Alerta" : "Sugestão",
+        title: `Categoria ${category} representa ${percent}% dos gastos`,
+        text: `Seu maior grupo de saída foi ${category}, com ${formatGrowthCurrency(data.total)}.`
+      });
+    }
+
+    const biggest = report.sent.slice().sort((a, b) => b.valor - a.valor)[0];
+    if (biggest) {
+      insights.push({
+        kind: "opportunity",
+        icon: "search",
+        label: "Oportunidade",
+        title: `Maior gasto: ${biggest.nome}`,
+        text: `A maior despesa foi ${formatGrowthCurrency(biggest.valor)} em ${biggest.categoria}. Vale conferir se ela é recorrente.`
+      });
+    }
+
+    if (sentCount >= 20) {
+      insights.push({
+        kind: "alert",
+        icon: "send",
+        label: "Alerta",
+        title: "Muitos Pix enviados no período",
+        text: `Foram ${sentCount} saídas. Agrupar compras e revisar recorrências pode reduzir gastos invisíveis.`
+      });
+    }
+
+    if (smallOutflows >= 8) {
+      insights.push({
+        kind: "suggestion",
+        icon: "coins",
+        label: "Sugestão",
+        title: "Muitas saídas pequenas",
+        text: `${smallOutflows} despesas foram pequenas. Revise compras impulsivas e assinaturas de baixo valor.`
+      });
+    }
+
+    if (avgTicket > 250) {
+      insights.push({
+        kind: "suggestion",
+        icon: "receipt",
+        label: "Sugestão",
+        title: "Ticket médio alto",
+        text: `Seu ticket médio de saída ficou em ${formatGrowthCurrency(avgTicket)}. Compare com meses anteriores antes de aumentar gastos fixos.`
+      });
+    }
+
+    if (Array.isArray(state.monthlySeries) && state.monthlySeries.length > 1) {
+      const current = state.monthlySeries[state.monthlySeries.length - 1];
+      const previous = state.monthlySeries[state.monthlySeries.length - 2];
+      if (current && previous && current.gasto > previous.gasto) {
+        const diff = current.gasto - previous.gasto;
+        insights.push({
+          kind: "opportunity",
+          icon: "trending-up",
+          label: "Comparação",
+          title: "Gastos subiram em relação ao mês anterior",
+          text: `Você gastou ${formatGrowthCurrency(diff)} a mais do que no mês anterior salvo.`
+        });
+      }
+    }
+
+    return insights.slice(0, 8);
+  }
+
+  function renderOutlookState() {
+    const buttons = [
+      document.getElementById("connectOutlookButton"),
+      document.getElementById("settingsOutlookButton")
+    ].filter(Boolean);
+
+    buttons.forEach((button) => {
+      button.hidden = !state.accessGranted && button.id === "connectOutlookButton";
+      button.classList.add("is-disabled");
+      const label = button.querySelector("span");
+      if (label) label.textContent = "Outlook/Hotmail Beta";
+      button.title = "Em breve: integração via Microsoft Graph API.";
+    });
+  }
+
+  function renderMobileTabbar() {
+    const tabbar = document.querySelector(".mobile-tabbar");
+    if (!tabbar) return;
+
+    const hasAccess = Boolean(state.accessGranted);
+    tabbar.hidden = !hasAccess;
+    document.body.classList.toggle("has-mobile-tabbar", hasAccess);
+
+    if (!hasAccess) return;
+
+    const activeSection = document.querySelector(".view.active-view")?.id || "dashboard";
+    tabbar.querySelectorAll("[data-mobile-section]").forEach((button) => {
+      const section = button.dataset.mobileSection || "dashboard";
+      button.classList.toggle("active", section === activeSection);
+      button.disabled = section === "admin" && !isAdminUser();
+    });
+  }
+
+  // Futuro: implementar OAuth Microsoft com Microsoft Graph API para ler e-mails Outlook/Hotmail.
+  function outlookAuth(source = "manual") {
+    if (source !== "init") {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Outlook/Hotmail ainda não implementado. Futuramente usar Microsoft Graph API.`, { source });
+      showToast("Outlook/Hotmail está em beta. Integração futura via Microsoft Graph API.");
+    }
+    return {
+      status: "beta",
+      provider: "microsoft-graph"
+    };
+  }
+
+  async function syncOutlookEmails() {
+    console.warn(`${FINANCEIRO_LOG_PREFIX} syncOutlookEmails é um stub. Microsoft Graph API será necessária no futuro.`);
+    return [];
+  }
+
+  function parseOutlookPixEmail(email) {
+    console.warn(`${FINANCEIRO_LOG_PREFIX} parseOutlookPixEmail é um stub beta.`, { subject: email && email.subject });
+    return null;
+  }
+
+  function renderReports() {
+    const root = document.getElementById("relatorios");
+    if (!root) return;
+
+    const period = getReportPeriod();
+    const report = calculateReport(period.month, period.year);
+
+    setText("reportIncome", formatGrowthCurrency(report.income));
+    setText("reportExpense", formatGrowthCurrency(report.expense));
+    setText("reportBalance", formatGrowthCurrency(report.balance));
+    setText("reportBiggestExpense", report.biggestExpense ? formatGrowthCurrency(report.biggestExpense.valor) : "R$ 0,00");
+    setText("reportSummaryLabel", `${MONTHS[period.month - 1]} de ${period.year}`);
+
+    const summary = document.getElementById("reportSummaryList");
+    if (summary) {
+      summary.innerHTML = [
+        ["Entradas", `${report.received.length} transações`],
+        ["Saídas", `${report.sent.length} transações`],
+        ["Receitas x despesas", `${formatGrowthCurrency(report.income)} / ${formatGrowthCurrency(report.expense)}`],
+        ["Maior gasto", report.biggestExpense ? `${escapeGrowthHtml(report.biggestExpense.nome)} - ${formatGrowthCurrency(report.biggestExpense.valor)}` : "Nenhum gasto no período"]
+      ].map(([label, value]) => `<div class="summary-kpi"><span>${label}</span><strong>${value}</strong></div>`).join("");
+    }
+
+    const top = document.getElementById("reportTopCategory");
+    if (top) {
+      top.innerHTML = report.topCategory
+        ? `<div>${escapeGrowthHtml(report.topCategory[0])}<br><small>${report.topCategory[1].count} usos - ${formatGrowthCurrency(report.topCategory[1].total)}</small></div>`
+        : "<div>Sem despesas no período</div>";
+    }
+  }
+
+  function renderGoals() {
+    const form = document.getElementById("goalsForm");
+    if (!form) return;
+
+    const period = getReportPeriod();
+    const report = calculateReport(period.month, period.year);
+    const goals = loadMonthlyGoals(period.month, period.year);
+    const savingsInput = document.getElementById("savingsGoalInput");
+    const limitInput = document.getElementById("monthlyLimitInput");
+
+    if (document.activeElement !== savingsInput && savingsInput) {
+      savingsInput.value = goals.savingsGoal || "";
+    }
+
+    if (document.activeElement !== limitInput && limitInput) {
+      limitInput.value = goals.monthlyLimit || "";
+    }
+
+    const savingsPercent = goals.savingsGoal ? Math.max(0, (report.balance / goals.savingsGoal) * 100) : 0;
+    const spendingPercent = goals.monthlyLimit ? (report.expense / goals.monthlyLimit) * 100 : 0;
+    const overLimit = goals.monthlyLimit > 0 && report.expense > goals.monthlyLimit;
+
+    setText("goalsStatusPill", overLimit ? "Limite excedido" : goals.savingsGoal || goals.monthlyLimit ? "Em acompanhamento" : "Sem meta");
+    setText("goalsProgressLabel", overLimit ? "Atenção: gasto mensal acima do limite" : "Progresso calculado com os dados atuais");
+
+    const list = document.getElementById("goalsProgressList");
+    if (list) {
+      list.innerHTML = [
+        progressItem("Economia do mês", report.balance, goals.savingsGoal, savingsPercent, false),
+        progressItem("Limite de gasto", report.expense, goals.monthlyLimit, spendingPercent, overLimit)
+      ].join("");
+    }
+  }
+
+  function renderBudgetSettings() {
+    const grid = document.getElementById("budgetCategoryGrid");
+    if (!grid || grid.dataset.editing === "true") return;
+
+    const period = getReportPeriod();
+    const report = calculateReport(period.month, period.year);
+    const budgets = loadCategoryBudgets(period.month, period.year);
+    const spent = getSpentByCategory(report);
+
+    grid.innerHTML = GROWTH_CATEGORIES.map((category) => {
+      const key = normalizeGrowthCategory(category);
+      const limit = Number(budgets[key] || 0);
+      const value = Number(spent[key] || 0);
+      const percent = limit ? (value / limit) * 100 : 0;
+      const over = limit > 0 && value > limit;
+
+      return `
+        <div class="budget-item${over ? " over-limit" : ""}">
+          <span>${escapeGrowthHtml(category)}</span>
+          <input data-budget-category="${escapeGrowthHtml(key)}" type="number" min="0" step="0.01" value="${limit || ""}" placeholder="Limite mensal">
+          <strong>${formatGrowthCurrency(value)}${limit ? ` / ${formatGrowthCurrency(limit)}` : ""}</strong>
+          <div class="progress-track${over ? " danger" : ""}" style="--progress:${Math.min(100, percent).toFixed(0)}%"><i></i></div>
+        </div>
+      `;
+    }).join("");
+
+    grid.querySelectorAll("input").forEach((input) => {
+      input.addEventListener("focus", () => { grid.dataset.editing = "true"; });
+      input.addEventListener("blur", () => { grid.dataset.editing = "false"; });
+    });
+  }
+
+  function renderBudgetAlerts() {
+    const panel = document.getElementById("budgetAlertPanel");
+    if (!panel) return;
+
+    const period = {
+      month: state.month,
+      year: state.year
+    };
+    const report = calculateReport(period.month, period.year);
+    const goals = loadMonthlyGoals(period.month, period.year);
+    const budgets = loadCategoryBudgets(period.month, period.year);
+    const spent = getSpentByCategory(report);
+    const alerts = Object.keys(budgets)
+      .filter((category) => Number(budgets[category]) > 0 && Number(spent[category] || 0) > Number(budgets[category]))
+      .map((category) => `${category}: ${formatGrowthCurrency(spent[category])} de ${formatGrowthCurrency(budgets[category])}`);
+
+    if (goals.monthlyLimit > 0 && report.expense > goals.monthlyLimit) {
+      alerts.unshift(`Limite mensal: ${formatGrowthCurrency(report.expense)} de ${formatGrowthCurrency(goals.monthlyLimit)}`);
+    }
+
+    if (!Object.keys(budgets).length && !goals.monthlyLimit) {
+      panel.hidden = true;
+      return;
+    }
+
+    panel.hidden = false;
+    panel.classList.toggle("success", alerts.length === 0);
+    panel.textContent = alerts.length
+      ? `Alerta de orçamento: ${alerts.join(" | ")}`
+      : "Metas e orçamentos dentro do limite neste período.";
+  }
+
+  function renderOnboarding() {
+    const button = document.getElementById("onboardingConnectGmailButton");
+    if (!button) return;
+
+    const label = button.querySelector("span");
+    if (label) {
+      label.textContent = state.gmailConnected ? "Atualizar Gmail" : "Conectar Gmail";
+    }
+  }
+
+  function renderProductionChecklist() {
+    const list = document.getElementById("productionChecklist");
+    if (!list) return;
+
+    const items = [
+      "functions/.env fora do projeto e do git",
+      "Usuário comum não vê modo API",
+      "Layout responsivo mobile conferido",
+      "Console sem erros críticos",
+      "Compatível com Vercel/hosting estático",
+      "Checklist de Gmail, convites e backup testado"
+    ];
+
+    list.innerHTML = items.map((item) => `
+      <span><i data-lucide="check-circle"></i>${escapeGrowthHtml(item)}</span>
+    `).join("");
+  }
+
+  function saveMonthlyGoals(event) {
+    event.preventDefault();
+
+    const period = getReportPeriod();
+    const goals = {
+      savingsGoal: Number(document.getElementById("savingsGoalInput")?.value || 0),
+      monthlyLimit: Number(document.getElementById("monthlyLimitInput")?.value || 0),
+      updatedAt: new Date().toISOString()
+    };
+
+    saveScopedJson(GOALS_STORAGE_PREFIX, goals, period.month, period.year);
+    addSystemLog("metas atualizadas", `${MONTHS[period.month - 1]} de ${period.year}`);
+    showToast("Metas financeiras salvas.");
+    renderGrowthFeatures();
+  }
+
+  function saveCategoryBudgets() {
+    const period = getReportPeriod();
+    const grid = document.getElementById("budgetCategoryGrid");
+    const budgets = {};
+
+    if (!grid) return;
+
+    grid.querySelectorAll("[data-budget-category]").forEach((input) => {
+      const value = Number(input.value || 0);
+      if (value > 0) budgets[input.dataset.budgetCategory] = value;
+    });
+
+    saveScopedJson(BUDGET_STORAGE_PREFIX, budgets, period.month, period.year);
+    grid.dataset.editing = "false";
+    addSystemLog("orçamento atualizado", `${Object.keys(budgets).length} categorias com limite`);
+    showToast("Orçamentos por categoria salvos.");
+    renderGrowthFeatures();
+  }
+
+  function loadMonthlyGoals(month, year) {
+    return loadScopedJson(GOALS_STORAGE_PREFIX, month, year, {
+      savingsGoal: 0,
+      monthlyLimit: 0
+    });
+  }
+
+  function loadCategoryBudgets(month, year) {
+    return loadScopedJson(BUDGET_STORAGE_PREFIX, month, year, {});
+  }
+
+  function saveScopedJson(prefix, data, month, year) {
+    const key = getScopedPeriodKey(prefix, month, year);
+    if (!key) return false;
+
+    try {
+      window.localStorage.setItem(key, JSON.stringify(data));
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar dados locais do MVP.`, error);
+      return false;
+    }
+  }
+
+  function loadScopedJson(prefix, month, year, fallback) {
+    const key = getScopedPeriodKey(prefix, month, year);
+    if (!key) return fallback;
+
+    try {
+      return JSON.parse(window.localStorage.getItem(key) || "null") || fallback;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar dados locais do MVP.`, error);
+      return fallback;
+    }
+  }
+
+  function getScopedPeriodKey(prefix, month, year) {
+    const email = normalizeEmail(state.systemUser && state.systemUser.email);
+    return email ? `${prefix}:${email}:${year}-${String(month).padStart(2, "0")}` : "";
+  }
+
+  function getSpentByCategory(report) {
+    return report.sent.reduce((acc, item) => {
+      const category = normalizeGrowthCategory(item.categoria);
+      acc[category] = (acc[category] || 0) + item.valor;
+      return acc;
+    }, {});
+  }
+
+  function progressItem(label, current, target, percent, danger) {
+    const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
+    const targetLabel = target ? formatGrowthCurrency(target) : "sem valor definido";
+
+    return `
+      <div class="goal-progress-item">
+        <span>${escapeGrowthHtml(label)}</span>
+        <strong>${formatGrowthCurrency(current)} / ${targetLabel}</strong>
+        <div class="progress-track${danger ? " danger" : ""}" style="--progress:${safePercent.toFixed(0)}%"><i></i></div>
+        <small>${target ? `${percent.toFixed(0)}%` : "Defina uma meta para acompanhar"}</small>
+      </div>
+    `;
+  }
+
+  function exportReportCsv() {
+    const period = getReportPeriod();
+    const report = calculateReport(period.month, period.year);
+    const csv = transactionsToCsv(report.transactions);
+
+    downloadTextFile(`relatorio-${period.year}-${String(period.month).padStart(2, "0")}.csv`, csv, "text/csv;charset=utf-8");
+    addSystemLog("relatório exportado", `${report.transactions.length} linhas em CSV`);
+  }
+
+  function exportAllCsv() {
+    const transactions = getActiveTransactions();
+    downloadTextFile("financeiro-transacoes.csv", transactionsToCsv(transactions), "text/csv;charset=utf-8");
+    addSystemLog("exportação CSV", `${transactions.length} transações exportadas`);
+  }
+
+  function exportBackupJson() {
+    const period = getReportPeriod();
+    const backup = {
+      version: 1,
+      app: "Financeiro Automático",
+      exportedAt: new Date().toISOString(),
+      user: state.systemUser ? {
+        email: state.systemUser.email,
+        name: state.systemUser.name,
+        role: state.systemUser.role
+      } : null,
+      period,
+      goals: loadMonthlyGoals(period.month, period.year),
+      budgets: loadCategoryBudgets(period.month, period.year),
+      settings: state.appSettings || loadSettingsFromLocal(),
+      sales: getVisibleSales(),
+      gmailTransactions: state.gmailPixTransactions || [],
+      currentTransactions: getActiveTransactions(),
+      logs: loadSystemLogs()
+    };
+
+    downloadTextFile("financeiro-backup.json", JSON.stringify(backup, null, 2), "application/json;charset=utf-8");
+    addSystemLog("backup exportado", "Backup JSON gerado");
+  }
+
+  function importBackupJson(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const backup = JSON.parse(reader.result || "{}");
+        const period = backup.period || getReportPeriod();
+
+        if (backup.goals) saveScopedJson(GOALS_STORAGE_PREFIX, backup.goals, period.month, period.year);
+        if (backup.budgets) saveScopedJson(BUDGET_STORAGE_PREFIX, backup.budgets, period.month, period.year);
+        if (backup.settings) {
+          state.appSettings = normalizeAppSettings(backup.settings);
+          saveSettingsToLocal(state.appSettings);
+          saveSettingsToFirestore(state.appSettings);
+          applyAppSettings();
+        }
+        if (Array.isArray(backup.sales)) {
+          backup.sales.map((sale) => normalizeSale(sale)).forEach(upsertSaleInState);
+          const grouped = new Map();
+          state.allSales.forEach((sale) => {
+            const email = normalizeEmail(sale.ownerEmail);
+            grouped.set(email, [...(grouped.get(email) || []), sale]);
+          });
+          grouped.forEach((sales, email) => saveSalesToLocal(email, sales));
+          backup.sales.forEach((sale) => saveSaleToFirestore(normalizeSale(sale)));
+        }
+        if (Array.isArray(backup.logs)) saveSystemLogs(backup.logs);
+
+        if (Array.isArray(backup.gmailTransactions) && backup.gmailTransactions.length) {
+          state.gmailPixTransactions = backup.gmailTransactions;
+          state.dataSource = "gmail";
+          saveGmailSessionData(state.gmailPixTransactions);
+          saveTransactionsToFirestore(state.gmailPixTransactions);
+          applyGmailPixToDashboard({ silent: true });
+        }
+
+        addSystemLog("backup importado", file.name);
+        showToast("Backup JSON importado.");
+        renderGrowthFeatures();
+      } catch (error) {
+        showToast(`Backup inválido: ${error.message}`, "error");
+      } finally {
+        event.target.value = "";
+      }
+    };
+
+    reader.readAsText(file);
+  }
+
+  function transactionsToCsv(transactions) {
+    const rows = [
+      ["tipo", "data", "nome", "categoria", "valor", "origem", "banco", "descricao"],
+      ...transactions.map((item) => [
+        item.tipo,
+        item.data,
+        item.nome,
+        item.categoria,
+        item.valor.toFixed(2).replace(".", ","),
+        item.origem || "",
+        item.banco || "",
+        item.descricao || ""
+      ])
+    ];
+
+    return rows.map((row) => row.map(csvCell).join(";")).join("\n");
+  }
+
+  function csvCell(value) {
+    const text = String(value ?? "");
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  function downloadTextFile(filename, content, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function addSystemLog(event, details, level = "info") {
+    const logs = loadSystemLogs();
+
+    logs.unshift({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: new Date().toISOString(),
+      event,
+      details: safeGrowthText(details, ""),
+      level,
+      user: state.systemUser ? state.systemUser.email : ""
+    });
+
+    saveSystemLogs(logs.slice(0, 200));
+    renderAdminLogs();
+  }
+
+  function loadSystemLogs() {
+    try {
+      return JSON.parse(window.localStorage.getItem(SYSTEM_LOGS_STORAGE_KEY) || "[]");
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function saveSystemLogs(logs) {
+    try {
+      window.localStorage.setItem(SYSTEM_LOGS_STORAGE_KEY, JSON.stringify(logs));
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar logs locais.`, error);
+    }
+  }
+
+  function renderAdminLogs() {
+    const table = document.getElementById("adminLogsTable");
+    if (!table) return;
+
+    if (!isAdminUser()) {
+      table.innerHTML = "";
+      return;
+    }
+
+    const logs = loadSystemLogs().slice(0, 80);
+    table.innerHTML = logs.length
+      ? logs.map((log) => `
+          <tr>
+            <td>${formatGrowthDateTime(log.at)}</td>
+            <td>${escapeGrowthHtml(log.event)}</td>
+            <td>${escapeGrowthHtml(log.details || log.user || "--")}</td>
+          </tr>
+        `).join("")
+      : `<tr><td colspan="3">Nenhum log registrado ainda.</td></tr>`;
+  }
+
+  function sumGrowthValues(items) {
+    return items.reduce((sum, item) => sum + (Number(item.valor) || 0), 0);
+  }
+
+  function parseGrowthDate(value) {
+    if (!value) return null;
+
+    const text = String(value).trim();
+    const isoDate = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoDate) {
+      const date = new Date(Number(isoDate[1]), Number(isoDate[2]) - 1, Number(isoDate[3]));
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    if (typeof parseDate === "function") {
+      const parsed = parseDate(value);
+      if (parsed && !Number.isNaN(parsed.getTime()) && parsed.getTime() !== 0) return parsed;
+    }
+
+    const brazilian = text.match(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+    if (brazilian) {
+      const year = Number(brazilian[3].length === 2 ? `20${brazilian[3]}` : brazilian[3]);
+      const date = new Date(year, Number(brazilian[2]) - 1, Number(brazilian[1]));
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    const date = new Date(text);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function formatGrowthCurrency(value) {
+    if (typeof formatCurrency === "function") return formatCurrency(value);
+
+    return new Intl.NumberFormat("pt-BR", {
+      style: "currency",
+      currency: "BRL"
+    }).format(Number(value) || 0);
+  }
+
+  function formatGrowthDateTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "--";
+
+    return new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(date);
+  }
+
+  function normalizeGrowthCategory(category) {
+    const text = safeGrowthText(category, "Outros").toLocaleLowerCase("pt-BR");
+    if (text.includes("aliment")) return "Alimentação";
+    if (text.includes("transp") || text.includes("uber") || text.includes("combust")) return "Transporte";
+    if (text.includes("lazer") || text.includes("restaurante") || text.includes("stream")) return "Lazer";
+    if (text.includes("compra") || text.includes("mercado") || text.includes("loja")) return "Compras";
+    if (text.includes("saúde") || text.includes("saude") || text.includes("farm")) return "Saúde";
+    return GROWTH_CATEGORIES.includes(category) ? category : "Outros";
+  }
+
+  function safeGrowthText(value, fallback = "") {
+    if (typeof safeText === "function") return safeText(value, fallback);
+    return String(value ?? fallback).trim() || fallback;
+  }
+
+  function escapeGrowthHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function setText(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
   }
 })();
