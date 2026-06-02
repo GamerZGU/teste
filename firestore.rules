@@ -1,0 +1,59 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function userEmail() {
+      return request.auth.token.email;
+    }
+
+    function userDoc(email) {
+      return get(/databases/$(database)/documents/users/$(email));
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(userEmail()))
+        && userDoc(userEmail()).data.role == "admin";
+    }
+
+    match /users/{userId} {
+      allow read: if isAdmin() || (signedIn() && userEmail() == userId);
+      allow create: if isAdmin()
+        || (
+          signedIn()
+          && userEmail() == userId
+          && request.resource.data.email == userId
+          && request.resource.data.role == "user"
+        );
+      allow update: if isAdmin()
+        || (
+          signedIn()
+          && userEmail() == userId
+          && request.resource.data.email == resource.data.email
+          && request.resource.data.role == resource.data.role
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /invites/{token} {
+      allow get: if resource.data.status == "active" || isAdmin();
+      allow list, create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (
+          resource.data.status == "active"
+          && request.resource.data.status == "used"
+          && request.resource.data.email == resource.data.email
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.createdAt == resource.data.createdAt
+        );
+    }
+
+    match /transactions/{userId}/items/{transactionId} {
+      allow read, write: if isAdmin() || (signedIn() && userEmail() == userId);
+    }
+  }
+}

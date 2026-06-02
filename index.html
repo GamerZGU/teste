@@ -4,10 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Financeiro Automático</title>
-  <link rel="stylesheet" href="style.css">
+  <link id="mainStylesheet" rel="stylesheet" href="style.css">
   <script src="script.js" defer></script>
   <script id="chartJsScript" src="https://cdn.jsdelivr.net/npm/chart.js" async></script>
   <script id="lucideScript" src="https://unpkg.com/lucide@latest" async></script>
+  <script id="firebaseAppScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app-compat.js" async></script>
+  <script id="firebaseAuthScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth-compat.js" async></script>
+  <script id="firebaseFirestoreScript" src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-compat.js" async></script>
 </head>
 <body>
   <div class="loading-overlay" id="loadingOverlay" hidden>
@@ -20,7 +23,53 @@
     </div>
   </div>
 
-  <div class="app-shell">
+  <div class="access-gate" id="accessGate">
+    <section class="access-card login-card" role="dialog" aria-labelledby="accessTitle" aria-modal="true">
+      <div class="access-icon">
+        <i data-lucide="lock-keyhole"></i>
+      </div>
+      <p class="eyebrow">Acesso restrito</p>
+      <h1 id="accessTitle">Financeiro Automático</h1>
+      <p id="accessMessage">Entre com seu usuário autorizado para acessar o dashboard.</p>
+      <form class="login-form" id="systemLoginForm">
+        <label class="login-field" for="systemLoginEmail">
+          <span>E-mail</span>
+          <input id="systemLoginEmail" type="email" autocomplete="email" placeholder="seu@email.com" required>
+        </label>
+        <label class="login-field" for="systemLoginPassword">
+          <span>Senha</span>
+          <input id="systemLoginPassword" type="password" autocomplete="current-password" placeholder="Digite sua senha" required>
+        </label>
+        <p class="login-error" id="systemLoginError" hidden>E-mail ou senha inválidos.</p>
+        <button class="google-button login-submit" id="systemLoginButton" type="submit">
+          <i data-lucide="log-in"></i>
+          <span>Entrar</span>
+        </button>
+      </form>
+      <form class="login-form invite-signup" id="inviteSignupForm" hidden>
+        <label class="login-field" for="inviteSignupName">
+          <span>Nome</span>
+          <input id="inviteSignupName" type="text" autocomplete="name" placeholder="Seu nome completo" required>
+        </label>
+        <label class="login-field" for="inviteSignupEmail">
+          <span>E-mail autorizado</span>
+          <input id="inviteSignupEmail" type="email" autocomplete="email" readonly required>
+        </label>
+        <label class="login-field" for="inviteSignupPassword">
+          <span>Senha</span>
+          <input id="inviteSignupPassword" type="password" autocomplete="new-password" placeholder="Crie uma senha" required>
+        </label>
+        <p class="login-error" id="inviteSignupError" hidden>Convite inválido ou já utilizado.</p>
+        <button class="google-button login-submit" type="submit">
+          <i data-lucide="user-check"></i>
+          <span>Criar acesso</span>
+        </button>
+      </form>
+      <span id="accessHint">A conexão Google/Gmail fica disponível após entrar no sistema.</span>
+    </section>
+  </div>
+
+  <div class="app-shell access-locked" id="appShell">
     <aside class="sidebar" aria-label="Menu principal">
       <div class="brand">
         <div class="brand-mark">
@@ -57,7 +106,50 @@
           <i data-lucide="settings"></i>
           <span>Configurações</span>
         </button>
+        <button class="nav-link admin-nav" type="button" data-section="admin" hidden>
+          <i data-lucide="shield-check"></i>
+          <span>Admin</span>
+        </button>
       </nav>
+
+      <div class="system-session" id="systemSession" hidden>
+        <div>
+          <span>Sessão ativa</span>
+          <strong id="systemUserName">Usuário</strong>
+          <small id="systemUserRole">admin</small>
+        </div>
+        <button class="signout-button compact-signout" id="systemLogoutButton" type="button">
+          <i data-lucide="log-out"></i>
+          <span>Sair</span>
+        </button>
+      </div>
+
+      <div class="auth-panel" id="authPanel">
+        <div class="auth-user" id="authUser" hidden>
+          <img id="authPhoto" src="" alt="Foto do usuário">
+          <div>
+            <strong id="authName">Usuário</strong>
+            <span id="authEmail">email@exemplo.com</span>
+          </div>
+        </div>
+
+        <button class="google-button" id="googleSignInButton" type="button">
+          <i data-lucide="log-in"></i>
+          <span>Entrar com Google</span>
+        </button>
+
+        <button class="signout-button" id="signOutButton" type="button" hidden>
+          <i data-lucide="log-out"></i>
+          <span>Sair</span>
+        </button>
+
+        <button class="gmail-button" id="connectGmailButton" type="button" hidden>
+          <i data-lucide="mail-check"></i>
+          <span>Conectar Gmail</span>
+        </button>
+
+        <p id="authStatus">Login Google opcional</p>
+      </div>
 
       <div class="sidebar-panel">
         <div class="status-row">
@@ -89,6 +181,10 @@
           <label class="field year-field" for="yearInput">
             <input id="yearInput" type="number" min="2020" max="2100" step="1" value="2026" aria-label="Ano">
           </label>
+          <div class="source-toggle" aria-label="Fonte dos dados">
+            <button class="source-option active" id="apiModeButton" type="button">API</button>
+            <button class="source-option" id="gmailModeButton" type="button">Gmail</button>
+          </div>
           <button class="icon-button primary-button" id="refreshButton" type="button">
             <i data-lucide="refresh-cw"></i>
             <span>Atualizar</span>
@@ -363,6 +459,93 @@
             <div class="setting-row">
               <span>Categorias</span>
               <strong id="settingsCategories">0</strong>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="admin" aria-labelledby="admin-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="admin-title">Admin</h2>
+            <p>Usuários liberados para testar o Financeiro Automático</p>
+          </div>
+          <span class="total-pill neutral" id="adminTotalUsers">0 usuários</span>
+        </div>
+
+        <div class="settings-grid admin-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Novo convite</h3>
+                <p>Gere um link fechado para cadastro</p>
+              </div>
+              <i data-lucide="ticket-plus"></i>
+            </div>
+            <form class="admin-form" id="adminUserForm">
+              <label class="login-field" for="adminEmail">
+                <span>E-mail autorizado</span>
+                <input id="adminEmail" type="email" autocomplete="email" placeholder="cliente@email.com" required>
+              </label>
+              <label class="login-field" for="adminRole">
+                <span>Função</span>
+                <select id="adminRole" required>
+                  <option value="user">user</option>
+                  <option value="admin">admin</option>
+                </select>
+              </label>
+              <label class="login-field" for="adminInviteLink">
+                <span>Link do convite</span>
+                <input id="adminInviteLink" type="text" readonly placeholder="Gere um convite para criar o link">
+              </label>
+              <p class="admin-message" id="adminMessage" hidden></p>
+              <button class="google-button login-submit" type="submit">
+                <i data-lucide="ticket-plus"></i>
+                <span>Gerar convite</span>
+              </button>
+            </form>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Usuários cadastrados</h3>
+                <p>Lista salva neste navegador</p>
+              </div>
+              <i data-lucide="users"></i>
+            </div>
+            <div class="table-wrap">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Nome</th>
+                    <th>E-mail</th>
+                    <th>Role</th>
+                  </tr>
+                </thead>
+                <tbody id="adminUsersTable"></tbody>
+              </table>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Convites</h3>
+                <p>Tokens gerados e status de uso</p>
+              </div>
+              <i data-lucide="ticket"></i>
+            </div>
+            <div class="table-wrap">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>E-mail</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="adminInvitesTable"></tbody>
+              </table>
             </div>
           </article>
         </div>

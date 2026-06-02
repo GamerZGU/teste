@@ -2,6 +2,43 @@
   "use strict";
 
   const API_URL = "https://script.google.com/macros/s/AKfycbx7sixleHf2AaEO2B1kl3QdJJrXHDAJ7tWnXfSc5g4xVSn-YgBhlpOhy3ASUvbK7SQiTw/exec";
+  const FIREBASE_CONFIG = window.FIREBASE_CONFIG || {
+    apiKey: "AIzaSyBCtEfGlMLaT7TyX0L0jN7oh-ezBzYEO1Q",
+    authDomain: "financeiro-automatico.firebaseapp.com",
+    projectId: "financeiro-automatico",
+    storageBucket: "financeiro-automatico.firebasestorage.app",
+    messagingSenderId: "17111161751",
+    appId: "1:17111161751:web:0ff4f00ca6f27a795442d2"
+  };
+  const DEFAULT_USERS = [
+    {
+      email: "gustavoladislau26@gmail.com",
+      password: "123456",
+      name: "Gustavo Ladislau",
+      role: "admin",
+      createdAt: "2026-05-29T02:02:00.000Z"
+    }
+  ];
+  const SYSTEM_SESSION_KEY = "financeiroAutomaticoUser";
+  const USERS_STORAGE_KEY = "financeiroAutomaticoUsers";
+  const GMAIL_SESSION_PREFIX = "financeiroAutomaticoGmail:";
+  const GMAIL_CONNECTION_PREFIX = "financeiroAutomaticoGmailConnection:";
+  const DATA_SOURCE_PREFIX = "financeiroAutomaticoDataSource:";
+  const INVITES_STORAGE_KEY = "financeiroAutomaticoInvites";
+  const USERS = loadUsers();
+  const INVITES = loadInvites();
+  const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+  const GMAIL_PIX_QUERIES = [
+    "subject:Pix",
+    "\"Pix recebido\"",
+    "\"Pix enviado\"",
+    "\"pagamento realizado\"",
+    "\"transferência realizada\""
+  ];
+  const GMAIL_MAX_MESSAGES = 20;
+  const GMAIL_REQUEST_DELAY_MS = 300;
+  const GMAIL_MAX_RETRIES = 4;
+  const FIREBASE_PLACEHOLDER = "COLE_";
   const MONTHS = [
     "Janeiro",
     "Fevereiro",
@@ -29,6 +66,28 @@
     monthlySeries: [],
     charts: {},
     pixDetailsModal: null,
+    firebaseAuth: null,
+    googleProvider: null,
+    firestoreDb: null,
+    firestoreReady: false,
+    firestoreSyncing: false,
+    firestoreError: "",
+    firestoreHydratedFor: "",
+    inviteLookupInProgress: false,
+    authReady: false,
+    authUser: null,
+    systemUser: getStoredSystemUser(),
+    accessGranted: false,
+    dataLoaded: false,
+    dataSource: "api",
+    gmailPixTransactions: [],
+    gmailAccessToken: "",
+    gmailConnected: false,
+    gmailEmail: "",
+    gmailConnectedAt: "",
+    gmailSessionExpired: false,
+    gmailFetchInProgress: false,
+    lastGmailRequestAt: 0,
     loadId: 0,
     connection: "Aguardando API"
   };
@@ -45,6 +104,7 @@
 
   function init() {
     cacheDom();
+    ensureStylesheetLoaded();
     state.pixDetailsModal = new PixDetailsModal({
       root: dom.pixDetailsModal,
       closeButton: dom.pixDetailsClose,
@@ -59,11 +119,13 @@
     populatePeriodControls();
     bindEvents();
     bindLibraryEvents();
+    renderInviteGate();
+    renderAuthPanel();
     dom.apiEndpoint.textContent = API_URL;
-    setStatus("Aguardando API", "neutral");
+    setStatus("Aguardando login", "neutral");
     renderApp();
+    updateAccessControl();
     createIcons();
-    loadFinancialData();
   }
 
   function cacheDom() {
@@ -80,6 +142,8 @@
     dom.historyMonth = document.getElementById("historyMonth");
     dom.historyYear = document.getElementById("historyYear");
     dom.refreshButton = document.getElementById("refreshButton");
+    dom.apiModeButton = document.getElementById("apiModeButton");
+    dom.gmailModeButton = document.getElementById("gmailModeButton");
     dom.navLinks = Array.from(document.querySelectorAll(".nav-link"));
     dom.views = Array.from(document.querySelectorAll(".view"));
     dom.metricGrid = document.getElementById("metricGrid");
@@ -124,6 +188,80 @@
     dom.pixDetailsNotice = document.getElementById("pixDetailsNotice");
     dom.pixDetailsContent = document.getElementById("pixDetailsContent");
     dom.pixDetailsIcon = document.getElementById("pixDetailsIcon");
+    dom.authPanel = document.getElementById("authPanel");
+    dom.authUser = document.getElementById("authUser");
+    dom.authPhoto = document.getElementById("authPhoto");
+    dom.authName = document.getElementById("authName");
+    dom.authEmail = document.getElementById("authEmail");
+    dom.authStatus = document.getElementById("authStatus");
+    dom.googleSignInButton = document.getElementById("googleSignInButton");
+    dom.signOutButton = document.getElementById("signOutButton");
+    dom.connectGmailButton = document.getElementById("connectGmailButton");
+    dom.appShell = document.getElementById("appShell");
+    dom.accessGate = document.getElementById("accessGate");
+    dom.accessMessage = document.getElementById("accessMessage");
+    dom.accessHint = document.getElementById("accessHint");
+    dom.systemLoginForm = document.getElementById("systemLoginForm");
+    dom.systemLoginEmail = document.getElementById("systemLoginEmail");
+    dom.systemLoginPassword = document.getElementById("systemLoginPassword");
+    dom.systemLoginError = document.getElementById("systemLoginError");
+    dom.inviteSignupForm = document.getElementById("inviteSignupForm");
+    dom.inviteSignupName = document.getElementById("inviteSignupName");
+    dom.inviteSignupEmail = document.getElementById("inviteSignupEmail");
+    dom.inviteSignupPassword = document.getElementById("inviteSignupPassword");
+    dom.inviteSignupError = document.getElementById("inviteSignupError");
+    dom.systemSession = document.getElementById("systemSession");
+    dom.systemUserName = document.getElementById("systemUserName");
+    dom.systemUserRole = document.getElementById("systemUserRole");
+    dom.systemLogoutButton = document.getElementById("systemLogoutButton");
+    dom.adminNavButton = document.querySelector("[data-section='admin']");
+    dom.adminTotalUsers = document.getElementById("adminTotalUsers");
+    dom.adminUsersTable = document.getElementById("adminUsersTable");
+    dom.adminInvitesTable = document.getElementById("adminInvitesTable");
+    dom.adminUserForm = document.getElementById("adminUserForm");
+    dom.adminEmail = document.getElementById("adminEmail");
+    dom.adminRole = document.getElementById("adminRole");
+    dom.adminInviteLink = document.getElementById("adminInviteLink");
+    dom.adminMessage = document.getElementById("adminMessage");
+  }
+
+  function ensureStylesheetLoaded() {
+    const link = document.getElementById("mainStylesheet");
+
+    const injectFallback = () => {
+      if (document.getElementById("styleFallback")) return;
+
+      const style = document.createElement("style");
+      style.id = "styleFallback";
+      style.textContent = `
+        body{margin:0;min-height:100vh;background:#050909;color:#f4fbf8;font-family:Inter,system-ui,sans-serif}
+        .app-shell{display:grid;grid-template-columns:286px 1fr;min-height:100vh}.app-shell.access-locked{display:none}
+        .sidebar,.panel,.access-card{background:#10181d;border:1px solid #25323b;border-radius:16px}
+        .sidebar{padding:24px}.main-content{padding:30px}.access-gate{position:fixed;inset:0;display:grid;place-items:center;background:#040808}
+        .google-button,.primary-button{background:#25d982;color:#06100d;border:0;border-radius:10px;padding:12px 16px;font-weight:800}
+      `;
+      document.head.appendChild(style);
+    };
+
+    const hasUsableStylesheet = () => {
+      if (!link || !link.sheet) return false;
+
+      try {
+        return link.sheet.cssRules.length > 0;
+      } catch (error) {
+        return true;
+      }
+    };
+
+    if (link) {
+      link.addEventListener("error", injectFallback, { once: true });
+    }
+
+    window.setTimeout(() => {
+      if (!hasUsableStylesheet()) {
+        injectFallback();
+      }
+    }, 900);
   }
 
   function populatePeriodControls() {
@@ -147,31 +285,31 @@
 
     dom.refreshButton.addEventListener("click", () => {
       syncPeriodFromHeader();
-      loadFinancialData(true);
+      refreshCurrentSource(true);
     });
 
     dom.monthSelect.addEventListener("change", () => {
       syncPeriodFromHeader();
       syncHistoryPeriod();
-      loadFinancialData();
+      refreshCurrentSource();
     });
 
     dom.yearInput.addEventListener("change", () => {
       syncPeriodFromHeader();
       syncHistoryPeriod();
-      loadFinancialData();
+      refreshCurrentSource();
     });
 
     dom.historyMonth.addEventListener("change", () => {
       syncPeriodFromHistory();
       syncHeaderPeriod();
-      loadFinancialData();
+      refreshCurrentSource();
     });
 
     dom.historyYear.addEventListener("change", () => {
       syncPeriodFromHistory();
       syncHeaderPeriod();
-      loadFinancialData();
+      refreshCurrentSource();
     });
 
     [dom.nameSearch, dom.categoryFilter, dom.typeFilter].forEach((control) => {
@@ -191,11 +329,24 @@
         row.click();
       });
     });
+
+    dom.googleSignInButton.addEventListener("click", signInWithGoogle);
+    dom.signOutButton.addEventListener("click", signOutGoogle);
+    dom.connectGmailButton.addEventListener("click", connectGmailAndSearchPix);
+    dom.apiModeButton.addEventListener("click", () => setDataSource("api"));
+    dom.gmailModeButton.addEventListener("click", () => setDataSource("gmail"));
+    dom.systemLoginForm.addEventListener("submit", handleSystemLogin);
+    dom.inviteSignupForm.addEventListener("submit", handleInviteSignup);
+    dom.systemLogoutButton.addEventListener("click", logoutSystem);
+    dom.adminUserForm.addEventListener("submit", handleAdminUserSubmit);
   }
 
   function bindLibraryEvents() {
     const chartScript = document.getElementById("chartJsScript");
     const lucideScript = document.getElementById("lucideScript");
+    const firebaseAppScript = document.getElementById("firebaseAppScript");
+    const firebaseAuthScript = document.getElementById("firebaseAuthScript");
+    const firebaseFirestoreScript = document.getElementById("firebaseFirestoreScript");
 
     if (chartScript) {
       chartScript.addEventListener("load", () => {
@@ -212,9 +363,19 @@
       lucideScript.addEventListener("load", createIcons, { once: true });
     }
 
+    [firebaseAppScript, firebaseAuthScript, firebaseFirestoreScript].forEach((script) => {
+      if (!script) return;
+      script.addEventListener("load", initFirebaseServices);
+      script.addEventListener("error", () => {
+        dom.authStatus.textContent = "Não foi possível carregar o Firebase.";
+        dom.googleSignInButton.disabled = true;
+      }, { once: true });
+    });
+
     window.setTimeout(() => {
       createIcons();
       renderCharts();
+      initFirebaseServices();
     }, 900);
   }
 
@@ -227,6 +388,1829 @@
     if (!transaction) return;
 
     state.pixDetailsModal.open(transaction);
+  }
+
+  function setDataSource(source) {
+    if (source === "api" && !isAdminUser()) {
+      state.dataSource = "gmail";
+      renderSourceMode();
+      showToast("Modo API disponível apenas para admin.", "error");
+      showGmailEmptyState();
+      return;
+    }
+
+    state.dataSource = source;
+    saveDataSourcePreference(source);
+    renderSourceMode();
+
+    if (source === "api") {
+      loadFinancialData(true);
+      return;
+    }
+
+    if (state.gmailPixTransactions.length || loadGmailSessionData()) {
+      applyGmailPixToDashboard();
+      return;
+    }
+
+    if (!state.gmailConnected) {
+      showToast("Conecte o Gmail para usar esta fonte de dados.", "error");
+      connectGmailAndSearchPix();
+      return;
+    }
+
+    if (!state.gmailAccessToken) {
+      showGmailExpired();
+      return;
+    }
+
+    searchPixInConnectedGmail(true);
+  }
+
+  async function refreshCurrentSource(isManualRefresh) {
+    if (state.dataSource === "api" && !isAdminUser()) {
+      state.dataSource = "gmail";
+      saveDataSourcePreference("gmail");
+      showGmailEmptyState();
+      return;
+    }
+
+    if (state.dataSource === "gmail") {
+      if (!state.gmailConnected) {
+        showToast("Conecte o Gmail para atualizar esta fonte.", "error");
+        renderAuthPanel();
+        return;
+      }
+
+      if (!state.gmailAccessToken) {
+        showGmailExpired();
+        return;
+      }
+
+      searchPixInConnectedGmail(isManualRefresh);
+      return;
+    }
+
+    loadFinancialData(isManualRefresh);
+  }
+
+  function renderSourceMode() {
+    dom.apiModeButton.hidden = !isAdminUser();
+    dom.apiModeButton.parentElement.classList.toggle("api-hidden", !isAdminUser());
+    if (!isAdminUser() && state.dataSource !== "gmail") {
+      state.dataSource = "gmail";
+    }
+    dom.apiModeButton.classList.toggle("active", state.dataSource === "api");
+    dom.gmailModeButton.classList.toggle("active", state.dataSource === "gmail");
+  }
+
+  function handleSystemLogin(event) {
+    event.preventDefault();
+
+    const email = normalizeEmail(dom.systemLoginEmail.value);
+    const password = dom.systemLoginPassword.value;
+    const user = USERS.find((item) => normalizeEmail(item.email) === email && item.password === password);
+
+    if (!user) {
+      dom.systemLoginError.hidden = false;
+      dom.systemLoginPassword.value = "";
+      dom.systemLoginPassword.focus();
+      return;
+    }
+
+    if (state.systemUser && normalizeEmail(state.systemUser.email) !== email) {
+      clearGmailConnection({ clearData: true });
+      state.data = createEmptyData(state.month, state.year);
+      state.monthlySeries = [];
+      state.dataLoaded = false;
+      state.dataSource = "api";
+    }
+
+    state.systemUser = {
+      email: user.email,
+      name: user.name,
+      role: user.role
+    };
+    saveSystemSession(state.systemUser);
+    saveCurrentUserToFirestore();
+    dom.systemLoginError.hidden = true;
+    dom.systemLoginForm.reset();
+    updateAccessControl();
+    showToast(`Bem-vindo, ${state.systemUser.name}.`);
+  }
+
+  function logoutSystem() {
+    clearGmailConnection({ clearData: true });
+    clearSystemSession();
+    state.systemUser = null;
+    state.accessGranted = false;
+    state.dataLoaded = false;
+    state.dataSource = "api";
+    state.data = createEmptyData(state.month, state.year);
+    state.monthlySeries = [];
+    updateAccessControl();
+    renderSourceMode();
+    showToast("Você saiu do sistema.");
+  }
+
+  function loadUsers() {
+    const usersByEmail = new Map(DEFAULT_USERS.map((user) => [normalizeEmail(user.email), normalizeUser(user)]));
+
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(USERS_STORAGE_KEY) || "[]");
+
+      if (Array.isArray(stored)) {
+        stored.forEach((user) => {
+          const normalized = normalizeUser(user);
+          if (normalized.email && normalized.password) {
+            usersByEmail.set(normalizeEmail(normalized.email), normalized);
+          }
+        });
+      }
+    } catch (error) {
+      console.warn("Não foi possível carregar usuários locais.", error);
+    }
+
+    return Array.from(usersByEmail.values());
+  }
+
+  function saveUsers() {
+    try {
+      window.localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(USERS));
+      return true;
+    } catch (error) {
+      console.warn("Não foi possível salvar usuários locais.", error);
+      return false;
+    }
+  }
+
+  function normalizeUser(user) {
+    return {
+      email: safeText(user && user.email, ""),
+      password: safeText(user && user.password, ""),
+      name: safeText(user && user.name, safeText(user && user.email, "Usuário")),
+      role: safeText(user && user.role, "user").toLocaleLowerCase("pt-BR") === "admin" ? "admin" : "user",
+      createdAt: safeText(user && user.createdAt, new Date().toISOString())
+    };
+  }
+
+  function handleAdminUserSubmit(event) {
+    event.preventDefault();
+
+    if (!isAdminUser()) {
+      showToast("Apenas admin pode adicionar usuários.", "error");
+      return;
+    }
+
+    const invite = normalizeInvite({
+      email: dom.adminEmail.value,
+      role: dom.adminRole.value
+    });
+
+    if (!invite.email) {
+      showAdminMessage("Informe o e-mail autorizado.", "error");
+      return;
+    }
+
+    const existingUnused = INVITES.find((item) => normalizeEmail(item.email) === normalizeEmail(invite.email) && !item.usedAt);
+    const finalInvite = existingUnused || invite;
+
+    if (!existingUnused) {
+      INVITES.push(finalInvite);
+      saveInvites();
+    }
+    saveInviteToFirestore(finalInvite);
+
+    const link = buildInviteLink(finalInvite.token);
+    dom.adminInviteLink.value = link;
+    dom.adminUserForm.reset();
+    dom.adminRole.value = "user";
+    dom.adminInviteLink.value = link;
+    renderAdmin();
+    showAdminMessage(existingUnused ? "Convite existente reutilizado." : "Convite gerado com sucesso.", "success");
+    showToast("Link de convite pronto.");
+  }
+
+  function showAdminMessage(message, type = "success") {
+    dom.adminMessage.textContent = message;
+    dom.adminMessage.classList.toggle("error", type === "error");
+    dom.adminMessage.hidden = false;
+  }
+
+  function saveSystemSession(user) {
+    const payload = JSON.stringify({
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      loggedAt: new Date().toISOString()
+    });
+
+    window.localStorage.setItem(SYSTEM_SESSION_KEY, payload);
+    window.sessionStorage.setItem(SYSTEM_SESSION_KEY, payload);
+  }
+
+  function clearSystemSession() {
+    window.localStorage.removeItem(SYSTEM_SESSION_KEY);
+    window.sessionStorage.removeItem(SYSTEM_SESSION_KEY);
+  }
+
+  function loadInvites() {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(INVITES_STORAGE_KEY) || "[]");
+      return Array.isArray(stored) ? stored.map(normalizeInvite).filter((invite) => invite.token && invite.email) : [];
+    } catch (error) {
+      console.warn("Não foi possível carregar convites locais.", error);
+      return [];
+    }
+  }
+
+  function saveInvites() {
+    try {
+      window.localStorage.setItem(INVITES_STORAGE_KEY, JSON.stringify(INVITES));
+      return true;
+    } catch (error) {
+      console.warn("Não foi possível salvar convites locais.", error);
+      return false;
+    }
+  }
+
+  function normalizeInvite(invite) {
+    const usedAt = safeText(invite && invite.usedAt, "");
+    return {
+      token: safeText(invite && invite.token, createInviteToken()),
+      email: normalizeEmail(invite && invite.email),
+      role: safeText(invite && invite.role, "user").toLocaleLowerCase("pt-BR") === "admin" ? "admin" : "user",
+      createdAt: safeText(invite && invite.createdAt, new Date().toISOString()),
+      usedAt,
+      status: safeText(invite && invite.status, usedAt ? "used" : "active")
+    };
+  }
+
+  function createInviteToken() {
+    const bytes = new Uint8Array(18);
+
+    if (window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(bytes);
+      return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
+  }
+
+  function getInviteTokenFromUrl() {
+    return safeText(new URLSearchParams(window.location.search).get("invite"), "");
+  }
+
+  function getActiveInvite() {
+    const token = getInviteTokenFromUrl();
+    if (!token) return null;
+
+    return INVITES.find((invite) => invite.token === token && !invite.usedAt) || null;
+  }
+
+  function renderInviteGate() {
+    const token = getInviteTokenFromUrl();
+    const invite = getActiveInvite();
+
+    if (!token) {
+      dom.systemLoginForm.hidden = false;
+      dom.inviteSignupForm.hidden = true;
+      return;
+    }
+
+    dom.systemLoginForm.hidden = Boolean(invite);
+    dom.inviteSignupForm.hidden = !invite;
+
+    if (!invite) {
+      if (canUseFirestore() && !state.inviteLookupInProgress) {
+        dom.accessMessage.textContent = "Carregando convite.";
+        dom.accessHint.textContent = "Validando token no Firestore.";
+        dom.systemLoginForm.hidden = true;
+        hydrateInviteFromFirestoreToken(token);
+        return;
+      }
+
+      dom.accessMessage.textContent = "Convite inválido ou já utilizado.";
+      dom.accessHint.textContent = "Peça um novo convite ao administrador.";
+      dom.systemLoginForm.hidden = false;
+      dom.inviteSignupError.hidden = false;
+      return;
+    }
+
+    dom.accessMessage.textContent = "Complete seu cadastro para acessar o Financeiro Automático.";
+    dom.accessHint.textContent = "Este convite só permite cadastrar o e-mail autorizado.";
+    dom.inviteSignupEmail.value = invite.email;
+  }
+
+  function handleInviteSignup(event) {
+    event.preventDefault();
+
+    const invite = getActiveInvite();
+    const email = normalizeEmail(dom.inviteSignupEmail.value);
+
+    if (!invite || email !== normalizeEmail(invite.email)) {
+      dom.inviteSignupError.textContent = "Convite inválido ou já utilizado.";
+      dom.inviteSignupError.hidden = false;
+      return;
+    }
+
+    const user = normalizeUser({
+      name: dom.inviteSignupName.value,
+      email,
+      password: dom.inviteSignupPassword.value,
+      role: invite.role
+    });
+
+    if (!user.name || !user.email || !user.password) {
+      dom.inviteSignupError.textContent = "Preencha nome e senha para concluir.";
+      dom.inviteSignupError.hidden = false;
+      return;
+    }
+
+    const existingIndex = USERS.findIndex((item) => normalizeEmail(item.email) === normalizeEmail(user.email));
+
+    if (existingIndex >= 0) {
+      USERS[existingIndex] = user;
+    } else {
+      USERS.push(user);
+    }
+
+    invite.usedAt = new Date().toISOString();
+    invite.status = "used";
+    saveUsers();
+    saveInvites();
+
+    state.systemUser = {
+      email: user.email,
+      name: user.name,
+      role: user.role
+    };
+    saveSystemSession(state.systemUser);
+    saveCurrentUserToFirestore();
+    saveInviteToFirestore(invite);
+    dom.inviteSignupForm.reset();
+    updateAccessControl();
+    showToast("Cadastro concluído. Bem-vindo!");
+  }
+
+  function buildInviteLink(token) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("invite", token);
+    return url.toString();
+  }
+
+  function getStoredSystemUser() {
+    try {
+      const raw = window.localStorage.getItem(SYSTEM_SESSION_KEY) || window.sessionStorage.getItem(SYSTEM_SESSION_KEY);
+      const stored = JSON.parse(raw || "null");
+
+      if (!stored || !isSystemUserAllowed(stored.email)) {
+        clearSystemSession();
+        return null;
+      }
+
+      return stored;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function isSystemUserAllowed(email) {
+    return USERS.some((user) => normalizeEmail(user.email) === normalizeEmail(email));
+  }
+
+  function initFirebaseServices() {
+    initFirebaseAuth();
+    initFirestore();
+  }
+
+  function initFirebaseAuth() {
+    if (state.authReady || state.firebaseAuth) return;
+
+    if (!isFirebaseConfigured()) {
+      dom.authStatus.textContent = "Configure o Firebase para ativar o login.";
+      dom.googleSignInButton.disabled = true;
+      updateAccessControl();
+      return;
+    }
+
+    if (!window.firebase || !window.firebase.auth) {
+      dom.authStatus.textContent = "Carregando Firebase Authentication.";
+      return;
+    }
+
+    try {
+      if (!window.firebase.apps.length) {
+        window.firebase.initializeApp(FIREBASE_CONFIG);
+      }
+
+      state.firebaseAuth = window.firebase.auth();
+      state.googleProvider = new window.firebase.auth.GoogleAuthProvider();
+      state.googleProvider.setCustomParameters({
+        prompt: "select_account"
+      });
+
+      state.firebaseAuth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL).catch(() => {});
+      state.firebaseAuth.onAuthStateChanged((user) => {
+        const previousEmail = normalizeEmail(state.authUser && state.authUser.email);
+        const nextEmail = normalizeEmail(user && user.email);
+
+        if ((previousEmail && previousEmail !== nextEmail) || (state.gmailEmail && nextEmail && normalizeEmail(state.gmailEmail) !== nextEmail)) {
+          clearGmailConnection({ clearData: true });
+        }
+        state.authReady = true;
+        state.authUser = user;
+        if (state.accessGranted && !state.gmailConnected) {
+          restoreGmailConnectionState();
+        }
+        renderAuthPanel();
+        updateAccessControl();
+      });
+
+      dom.authStatus.textContent = "Login Google pronto.";
+      dom.googleSignInButton.disabled = false;
+    } catch (error) {
+      dom.authStatus.textContent = "Erro ao iniciar Firebase Authentication.";
+      dom.googleSignInButton.disabled = true;
+      showToast(`Firebase Auth: ${error.message}`, "error");
+    }
+  }
+
+  function initFirestore() {
+    if (state.firestoreReady || state.firestoreDb) return Boolean(state.firestoreDb);
+
+    if (!isFirebaseConfigured()) {
+      state.firestoreError = "Firebase não configurado.";
+      return false;
+    }
+
+    if (!window.firebase || !window.firebase.firestore) {
+      state.firestoreError = "Firestore ainda não carregado.";
+      return false;
+    }
+
+    try {
+      if (!window.firebase.apps.length) {
+        window.firebase.initializeApp(FIREBASE_CONFIG);
+      }
+
+      state.firestoreDb = window.firebase.firestore();
+      state.firestoreReady = true;
+      state.firestoreError = "";
+      hydrateInviteFromFirestoreToken();
+      syncLocalDataToFirestore();
+      hydrateFirestoreData();
+      return true;
+    } catch (error) {
+      state.firestoreDb = null;
+      state.firestoreReady = false;
+      state.firestoreError = error.message || "Erro ao iniciar Firestore.";
+      console.warn("Firestore indisponível. Usando fallback localStorage.", error);
+      return false;
+    }
+  }
+
+  function canUseFirestore() {
+    return Boolean(state.firestoreDb && state.firestoreReady);
+  }
+
+  function syncFirestoreForCurrentUser() {
+    if (!state.systemUser) return;
+
+    initFirestore();
+
+    if (!canUseFirestore()) return;
+
+    const hydrateKey = `${getCurrentUserId()}:${isAdminUser() ? "admin" : "user"}`;
+    syncLocalDataToFirestore();
+
+    if (state.firestoreHydratedFor === hydrateKey) return;
+
+    state.firestoreHydratedFor = hydrateKey;
+    hydrateFirestoreData();
+  }
+
+  async function syncLocalDataToFirestore() {
+    if (!canUseFirestore() || state.firestoreSyncing) return;
+
+    state.firestoreSyncing = true;
+
+    try {
+      if (state.systemUser) {
+        await saveCurrentUserToFirestore();
+      }
+
+      if (isAdminUser()) {
+        for (const user of USERS) {
+          await saveUserToFirestore(user);
+        }
+
+        for (const invite of INVITES) {
+          await saveInviteToFirestore(invite);
+        }
+      }
+
+      if (state.gmailPixTransactions.length) {
+        await saveTransactionsToFirestore(state.gmailPixTransactions);
+      }
+    } catch (error) {
+      state.firestoreError = error.message || "Falha ao sincronizar Firestore.";
+      console.warn("Firestore falhou. Mantendo fallback localStorage.", error);
+    } finally {
+      state.firestoreSyncing = false;
+    }
+  }
+
+  async function hydrateFirestoreData() {
+    if (!canUseFirestore() || !state.systemUser) return;
+
+    try {
+      if (isAdminUser()) {
+        await hydrateUsersFromFirestore();
+        await hydrateInvitesFromFirestore();
+      }
+
+      await hydrateTransactionsFromFirestore();
+      renderAdmin();
+    } catch (error) {
+      state.firestoreError = error.message || "Falha ao carregar Firestore.";
+      console.warn("Firestore indisponível. Usando fallback localStorage.", error);
+    }
+  }
+
+  async function hydrateUsersFromFirestore() {
+    const snapshot = await state.firestoreDb.collection("users").get();
+    const byEmail = new Map(USERS.map((user) => [normalizeEmail(user.email), user]));
+
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      const localUser = byEmail.get(normalizeEmail(data.email || doc.id));
+      const remote = normalizeUser({
+        ...data,
+        email: data.email || doc.id,
+        password: data.password || (localUser && localUser.password) || "",
+        createdAt: data.createdAt || ""
+      });
+
+      if (remote.email) {
+        byEmail.set(normalizeEmail(remote.email), remote);
+      }
+    });
+
+    USERS.splice(0, USERS.length, ...Array.from(byEmail.values()));
+    saveUsers();
+  }
+
+  async function hydrateInvitesFromFirestore() {
+    const snapshot = await state.firestoreDb.collection("invites").get();
+    const byToken = new Map(INVITES.map((invite) => [invite.token, invite]));
+
+    snapshot.forEach((doc) => {
+      const remote = normalizeInvite({
+        token: doc.id,
+        ...doc.data()
+      });
+
+      if (remote.token) {
+        byToken.set(remote.token, remote);
+      }
+    });
+
+    INVITES.splice(0, INVITES.length, ...Array.from(byToken.values()));
+    saveInvites();
+  }
+
+  async function hydrateInviteFromFirestoreToken(token = getInviteTokenFromUrl()) {
+    if (!canUseFirestore() || !token || state.inviteLookupInProgress) return false;
+
+    state.inviteLookupInProgress = true;
+
+    try {
+      const doc = await state.firestoreDb.collection("invites").doc(token).get();
+
+      if (!doc.exists) return false;
+
+      const invite = normalizeInvite({
+        token: doc.id,
+        ...doc.data()
+      });
+
+      const index = INVITES.findIndex((item) => item.token === invite.token);
+      if (index >= 0) {
+        INVITES[index] = invite;
+      } else {
+        INVITES.push(invite);
+      }
+
+      saveInvites();
+      renderInviteGate();
+      return true;
+    } catch (error) {
+      state.firestoreError = error.message || "Falha ao buscar convite.";
+      console.warn("Convite não carregou no Firestore. Usando fallback localStorage.", error);
+      return false;
+    } finally {
+      state.inviteLookupInProgress = false;
+    }
+  }
+
+  async function hydrateTransactionsFromFirestore() {
+    const userId = getCurrentUserId();
+    if (!userId) return false;
+
+    const snapshot = await state.firestoreDb
+      .collection("transactions")
+      .doc(userId)
+      .collection("items")
+      .get();
+
+    const transactions = [];
+    snapshot.forEach((doc) => {
+      const transaction = normalizeFirestoreTransaction(doc.id, doc.data());
+      if (transaction) transactions.push(transaction);
+    });
+
+    if (!transactions.length) return false;
+
+    state.gmailPixTransactions = transactions.sort((a, b) => (parseDate(b.data).getTime() || 0) - (parseDate(a.data).getTime() || 0));
+    saveGmailSessionData(state.gmailPixTransactions);
+
+    if (state.dataSource === "gmail") {
+      applyGmailPixToDashboard({ silent: true });
+    }
+
+    return true;
+  }
+
+  async function saveCurrentUserToFirestore() {
+    if (!state.systemUser) return false;
+    return saveUserToFirestore(state.systemUser);
+  }
+
+  async function saveUserToFirestore(user) {
+    if (!canUseFirestore()) return false;
+
+    const normalized = normalizeUser(user);
+    if (!normalized.email) return false;
+    const localUser = USERS.find((item) => normalizeEmail(item.email) === normalizeEmail(normalized.email));
+    const password = normalized.password || (localUser && localUser.password) || "";
+    const payload = {
+      name: normalized.name,
+      email: normalizeEmail(normalized.email),
+      role: normalized.role,
+      createdAt: normalized.createdAt || new Date().toISOString()
+    };
+
+    if (password) {
+      payload.password = password;
+    }
+
+    try {
+      await state.firestoreDb.collection("users").doc(getUserIdFromEmail(normalized.email)).set(payload, { merge: true });
+      return true;
+    } catch (error) {
+      state.firestoreError = error.message || "Falha ao salvar usuário.";
+      console.warn("Usuário mantido no fallback localStorage.", error);
+      return false;
+    }
+  }
+
+  async function saveInviteToFirestore(invite) {
+    if (!canUseFirestore()) return false;
+
+    const normalized = normalizeInvite(invite);
+    if (!normalized.token || !normalized.email) return false;
+
+    try {
+      await state.firestoreDb.collection("invites").doc(normalized.token).set({
+        email: normalizeEmail(normalized.email),
+        role: normalized.role,
+        status: normalized.usedAt ? "used" : normalized.status || "active",
+        createdAt: normalized.createdAt || new Date().toISOString(),
+        usedAt: normalized.usedAt || ""
+      }, { merge: true });
+      return true;
+    } catch (error) {
+      state.firestoreError = error.message || "Falha ao salvar convite.";
+      console.warn("Convite mantido no fallback localStorage.", error);
+      return false;
+    }
+  }
+
+  async function saveTransactionsToFirestore(transactions) {
+    if (!canUseFirestore() || !state.systemUser || !Array.isArray(transactions) || !transactions.length) return false;
+
+    const userId = getCurrentUserId();
+    if (!userId) return false;
+
+    try {
+      const batch = state.firestoreDb.batch();
+      const collection = state.firestoreDb.collection("transactions").doc(userId).collection("items");
+
+      transactions.forEach((transaction, index) => {
+        const id = getTransactionFirestoreId(transaction, index);
+        batch.set(collection.doc(id), toFirestoreTransaction(transaction), { merge: true });
+      });
+
+      await batch.commit();
+      return true;
+    } catch (error) {
+      state.firestoreError = error.message || "Falha ao salvar transações.";
+      console.warn("Transações mantidas no fallback localStorage.", error);
+      return false;
+    }
+  }
+
+  function toFirestoreTransaction(transaction) {
+    const gmailMessageId = transaction.gmailMessageId || transaction.emailId || transaction.id || "";
+
+    return {
+      tipo: transaction.tipo,
+      nome: transaction.nome || transaction.destino || "",
+      valor: Number(transaction.valor) || 0,
+      data: transaction.data || "",
+      categoria: transaction.categoria || "Gmail / Pix",
+      banco: transaction.banco || transaction.origemPix || transaction.origem || "",
+      origem: "gmail",
+      gmailMessageId,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  function normalizeFirestoreTransaction(id, data) {
+    if (!data || typeof data !== "object") return null;
+
+    return {
+      id,
+      emailId: safeText(data.gmailMessageId, id),
+      gmailMessageId: safeText(data.gmailMessageId, id),
+      tipo: data.tipo === "enviado" || data.tipo === "saida" ? "enviado" : "recebido",
+      nome: safeText(data.nome, "Transação Pix"),
+      valor: Number(data.valor) || 0,
+      data: safeText(data.data, ""),
+      categoria: safeText(data.categoria, "Gmail / Pix"),
+      banco: safeText(data.banco, ""),
+      descricao: `Pix identificado no ${safeText(data.origem, "gmail")}`,
+      raw: clonePlainObject(data)
+    };
+  }
+
+  function getTransactionFirestoreId(transaction, index) {
+    const base = transaction.emailId || transaction.id || transaction.transactionId || `${transaction.tipo}-${transaction.data}-${transaction.nome}-${transaction.valor}-${index}`;
+    return encodeURIComponent(String(base).replace(/\//g, "-")).slice(0, 420);
+  }
+
+  function getCurrentUserId() {
+    return getUserIdFromEmail(state.systemUser && state.systemUser.email);
+  }
+
+  function getUserIdFromEmail(email) {
+    const normalized = normalizeEmail(email);
+    return normalized ? normalized.replace(/\//g, "_") : "";
+  }
+
+  async function signInWithGoogle() {
+    initFirebaseServices();
+
+    if (!state.firebaseAuth || !state.googleProvider) {
+      const message = isFirebaseConfigured()
+        ? "Firebase Authentication ainda está carregando. Tente novamente em alguns segundos."
+        : "Preencha o firebaseConfig para ativar o login Google.";
+      showToast(message, "error");
+      return;
+    }
+
+    try {
+      dom.googleSignInButton.disabled = true;
+      dom.authStatus.textContent = "Abrindo login do Google.";
+      await state.firebaseAuth.signInWithPopup(state.googleProvider);
+    } catch (error) {
+      dom.googleSignInButton.disabled = false;
+      dom.authStatus.textContent = "Não foi possível entrar com Google.";
+      showToast(`Login Google: ${friendlyAuthError(error)}`, "error");
+    }
+  }
+
+  async function signOutGoogle() {
+    if (!state.firebaseAuth) return;
+
+    try {
+      clearGmailConnection({ clearData: true, clearStored: true });
+      await state.firebaseAuth.signOut();
+      showToast("Você saiu da conta Google.");
+    } catch (error) {
+      showToast(`Erro ao sair: ${friendlyAuthError(error)}`, "error");
+    }
+  }
+
+  async function connectGmailAndSearchPix() {
+    if (state.gmailFetchInProgress) {
+      showToast("Busca no Gmail já está em andamento.");
+      return;
+    }
+
+    if (!state.accessGranted) {
+      showToast("Entre no sistema antes de conectar o Gmail.", "error");
+      return;
+    }
+
+    initFirebaseServices();
+
+    if (!state.firebaseAuth) {
+      showToast("Firebase Authentication ainda não está pronto.", "error");
+      return;
+    }
+
+    state.gmailFetchInProgress = true;
+    dom.connectGmailButton.disabled = true;
+    dom.authStatus.textContent = "Pedindo permissão do Gmail.";
+
+    try {
+      const provider = createGmailProvider();
+      const result = state.authUser
+        ? await state.authUser.reauthenticateWithPopup(provider)
+        : await state.firebaseAuth.signInWithPopup(provider);
+      const credential = window.firebase.auth.GoogleAuthProvider.credentialFromResult(result) || result.credential;
+      const accessToken = credential && credential.accessToken;
+
+      if (!accessToken) {
+        throw new Error("token do Gmail não retornado pelo Google");
+      }
+
+      state.gmailAccessToken = accessToken;
+      state.gmailConnected = true;
+      state.authUser = result.user || state.authUser;
+      state.gmailEmail = (state.authUser && state.authUser.email) || "";
+      state.gmailConnectedAt = new Date().toISOString();
+      state.gmailSessionExpired = false;
+      saveGmailConnectionMetadata();
+      await searchPixInConnectedGmail(true);
+    } catch (error) {
+      if (isGmailAuthExpiredError(error)) {
+        showGmailExpired();
+      } else {
+        if (state.gmailEmail || loadGmailConnectionMetadata()) {
+          state.gmailAccessToken = "";
+          state.gmailSessionExpired = true;
+        } else {
+          clearGmailConnection();
+        }
+        dom.authStatus.textContent = "Gmail não conectado.";
+        showToast(`Gmail API: ${friendlyAuthError(error)}`, "error");
+      }
+    } finally {
+      state.gmailFetchInProgress = false;
+      renderAuthPanel();
+    }
+  }
+
+  function createGmailProvider() {
+    const provider = new window.firebase.auth.GoogleAuthProvider();
+    provider.addScope(GMAIL_READONLY_SCOPE);
+    provider.setCustomParameters({
+      prompt: "select_account",
+      login_hint: (state.authUser && state.authUser.email) || ""
+    });
+    return provider;
+  }
+
+  async function searchPixInConnectedGmail(isManualRefresh) {
+    if (!state.gmailAccessToken) {
+      showToast("Conecte o Gmail antes de buscar e-mails Pix.", "error");
+      return;
+    }
+
+    state.gmailFetchInProgress = true;
+    dom.connectGmailButton.disabled = true;
+    dom.authStatus.textContent = "Lendo e-mails Pix no Gmail.";
+
+    try {
+      const emails = await fetchPixEmailsFromGmail(state.gmailAccessToken);
+      const pixTransactions = extractPixTransactionsFromEmails(emails);
+
+      state.gmailPixTransactions = pixTransactions;
+      state.dataSource = "gmail";
+      saveDataSourcePreference("gmail");
+      saveGmailSessionData(pixTransactions);
+      saveTransactionsToFirestore(pixTransactions);
+      logGmailPixEmails(emails, pixTransactions);
+      applyGmailPixToDashboard();
+
+      dom.authStatus.textContent = `${pixTransactions.length} Pix identificados via Gmail.`;
+      showToast(`${pixTransactions.length} Pix identificados via Gmail.`);
+    } catch (error) {
+      if (isGmailAuthExpiredError(error)) {
+        showGmailExpired();
+      } else {
+        dom.authStatus.textContent = "Não foi possível ler os e-mails Pix.";
+        showToast(`Gmail API: ${friendlyAuthError(error)}`, "error");
+      }
+      if (!isManualRefresh) {
+        state.dataSource = "api";
+        renderSourceMode();
+      }
+    } finally {
+      state.gmailFetchInProgress = false;
+      renderAuthPanel();
+    }
+  }
+
+  async function fetchPixEmailsFromGmail(accessToken) {
+    const byId = new Map();
+
+    for (const query of GMAIL_PIX_QUERIES) {
+      if (byId.size >= GMAIL_MAX_MESSAGES) break;
+
+      const messages = await listGmailMessages(accessToken, query);
+      messages.forEach((message) => {
+        if (byId.size >= GMAIL_MAX_MESSAGES && !byId.has(message.id)) return;
+
+        if (!byId.has(message.id)) {
+          byId.set(message.id, {
+            id: message.id,
+            threadId: message.threadId,
+            matchedQueries: []
+          });
+        }
+        byId.get(message.id).matchedQueries.push(query);
+      });
+    }
+
+    const uniqueMessages = Array.from(byId.values()).slice(0, GMAIL_MAX_MESSAGES);
+    const details = [];
+
+    for (const message of uniqueMessages) {
+      const metadata = await getGmailMessageMetadata(accessToken, message);
+
+      if (metadata) {
+        details.push(metadata);
+      }
+
+      console.log(`Gmail API: ${details.length}/${uniqueMessages.length} mensagens processadas.`);
+    }
+
+    return details.filter(Boolean);
+  }
+
+  async function listGmailMessages(accessToken, query) {
+    const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+    url.searchParams.set("q", query);
+    url.searchParams.set("maxResults", String(GMAIL_MAX_MESSAGES));
+
+    const data = await gmailFetchJson(url, accessToken);
+    return Array.isArray(data.messages) ? data.messages : [];
+  }
+
+  async function getGmailMessageMetadata(accessToken, message) {
+    const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}`);
+    url.searchParams.set("format", "full");
+
+    const data = await gmailFetchJson(url, accessToken);
+    const headers = (data.payload && data.payload.headers) || [];
+    const bodyText = extractGmailText(data.payload);
+
+    return {
+      id: data.id,
+      threadId: data.threadId,
+      matchedQueries: message.matchedQueries,
+      subject: getHeader(headers, "Subject"),
+      from: getHeader(headers, "From"),
+      to: getHeader(headers, "To"),
+      date: getHeader(headers, "Date"),
+      snippet: data.snippet || "",
+      bodyText,
+      labelIds: data.labelIds || []
+    };
+  }
+
+  function extractPixTransactionsFromEmails(emails) {
+    const transactions = [];
+
+    emails.forEach((email) => {
+      const parsed = parsePixEmail(email);
+
+      if (parsed) {
+        transactions.push(parsed);
+      }
+    });
+
+    console.log(`Pix identificados com sucesso: ${transactions.length}/${emails.length}`);
+    return transactions;
+  }
+
+  function parsePixEmail(email) {
+    const sourceText = normalizeEmailText(`${email.subject}\n${email.snippet}\n${email.bodyText}`);
+    const type = detectPixType(sourceText, email.matchedQueries);
+    const value = extractPixValue(sourceText);
+    const name = extractPixName(sourceText, type, email);
+    const date = extractPixDate(sourceText) || formatGmailHeaderDate(email.date);
+    const category = extractPixCategory(sourceText, type, name);
+
+    if (!type || !value || !name || !date) {
+      return null;
+    }
+
+    return {
+      tipo: type,
+      nome: name,
+      valor: value,
+      data: date,
+      categoria: category,
+      descricao: type === "recebido" ? "Pix recebido via Gmail" : "Pix enviado via Gmail",
+      emailId: email.id,
+      subject: email.subject,
+      raw: email
+    };
+  }
+
+  function detectPixType(text, matchedQueries) {
+    const queryText = Array.isArray(matchedQueries) ? matchedQueries.join(" ") : "";
+    const haystack = `${text} ${queryText}`.toLocaleLowerCase("pt-BR");
+
+    if (/pix recebido|recebeu um pix|pix recebido de|valor recebido|cr[eé]dito recebido|voc[eê] recebeu|pix creditado|entrada pix|transfer[eê]ncia recebida/.test(haystack)) {
+      return "recebido";
+    }
+
+    if (/pix enviado|pix realizado|pagamento realizado|transfer[eê]ncia realizada|comprovante de pagamento|voc[eê] pagou|valor enviado|d[eé]bito realizado|pix pago|voc[eê] fez um pix|enviou um pix/.test(haystack)) {
+      return "enviado";
+    }
+
+    return "";
+  }
+
+  function extractPixValue(text) {
+    const priorityPatterns = [
+      /(?:valor|valor do pix|valor da transa[cç][aã]o|valor enviado|valor recebido|total)\s*:?\s*(?:R\$|BRL)\s*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2}|[0-9]+,[0-9]{2})/i,
+      /(?:pix|pagamento|transfer[eê]ncia)[^\n\r]{0,80}(?:R\$|BRL)\s*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2}|[0-9]+,[0-9]{2})/i
+    ];
+
+    for (const pattern of priorityPatterns) {
+      const match = text.match(pattern);
+      const value = match ? parseCurrency(`R$ ${match[1]}`) : 0;
+      if (value > 0) return value;
+    }
+
+    const matches = Array.from(text.matchAll(/(?:R\$|BRL)\s*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2}|[0-9]+,[0-9]{2})/gi));
+
+    if (!matches.length) return 0;
+
+    const values = matches
+      .map((match) => parseCurrency(`R$ ${match[1]}`))
+      .filter((value) => value > 0);
+
+    return values.length ? values[0] : 0;
+  }
+
+  function extractPixName(text, type, email) {
+    const patterns = type === "recebido"
+      ? [
+          /(?:quem enviou|enviado por|pagador|remetente)\s*:?\s*([^\n\r]{3,100})/i,
+          /pix recebido de\s+([^\n\r.]{3,90})/i,
+          /(?:origem|conta de origem)\s*:?\s*([^\n\r]{3,100})/i,
+          /(?:de)\s*:?\s*([A-ZÀ-Ú0-9][^\n\r]{3,90})/i
+        ]
+      : [
+          /(?:destinat[áa]rio|favorecido|recebedor|benefici[áa]rio|destino)\s*:?\s*([^\n\r]{3,100})/i,
+          /pix (?:enviado|realizado) para\s+([^\n\r.]{3,90})/i,
+          /(?:para)\s*:?\s*([A-ZÀ-Ú0-9][^\n\r]{3,90})/i
+        ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      const name = match && cleanPixName(match[1]);
+
+      if (name && !isOwnOrInvalidPixName(name)) {
+        return name;
+      }
+    }
+
+    const bankName = extractPixBankName(text);
+    if (bankName && !isOwnOrInvalidPixName(bankName)) {
+      return bankName;
+    }
+
+    const headerName = extractNameFromEmailHeader(type === "recebido" ? email.from : email.to);
+    return isOwnOrInvalidPixName(headerName) ? "" : headerName;
+  }
+
+  function cleanPixName(value) {
+    const text = safeText(value, "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\b(CPF|CNPJ|Banco|Institui[cç][aã]o|Valor|Data|Hora|Chave|Ag[eê]ncia|Conta|Descri[cç][aã]o|Identificador|Autentica[cç][aã]o)\b.*$/i, "")
+      .replace(/[|•].*$/g, "")
+      .replace(/<[^>]+>/g, "")
+      .replace(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi, "")
+      .replace(/[:;,-]+$/g, "")
+      .trim();
+
+    if (!text || text.length < 3) return "";
+    return tidyName(text.slice(0, 90), "");
+  }
+
+  function extractPixBankName(text) {
+    const patterns = [
+      /(?:banco|institui[cç][aã]o|institui[cç][aã]o financeira)\s*:?\s*([^\n\r]{3,80})/i,
+      /(?:via|pelo|no)\s+(Banco\s+[A-ZÀ-Úa-zà-ú0-9 .&-]{3,70})/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      const name = match && cleanPixName(match[1]);
+      if (name) return name;
+    }
+
+    return "";
+  }
+
+  function extractPixCategory(text, type, name) {
+    if (type === "recebido") return "Recebimentos";
+
+    const haystack = normalizeForSearch(`${text} ${name}`);
+    const rules = [
+      { category: "Alimentação", pattern: /ifood|restaurante|lanchonete|mercado|supermercado|padaria|acai|pizza|burger/ },
+      { category: "Transporte", pattern: /uber|99|taxi|combustivel|posto|estacionamento|metro|passagem/ },
+      { category: "Saúde", pattern: /farmacia|drogaria|clinica|medico|hospital|laboratorio/ },
+      { category: "Moradia", pattern: /aluguel|condominio|energia|luz|agua|internet|telefone|gas/ },
+      { category: "Lazer", pattern: /cinema|show|netflix|spotify|prime|ingresso|viagem|hotel/ },
+      { category: "Serviços", pattern: /servico|assinatura|software|curso|manutencao|freela|freelancer/ },
+      { category: "Transferências", pattern: /transferencia|pix enviado|pix realizado|favorecido|destinatario/ }
+    ];
+
+    const found = rules.find((rule) => rule.pattern.test(haystack));
+    return found ? found.category : "Gmail / Pix";
+  }
+
+  function isOwnOrInvalidPixName(value) {
+    const name = safeText(value, "");
+    const normalized = normalizeEmail(name);
+    const searchable = normalizeForSearch(name);
+    const knownEmails = [state.systemUser && state.systemUser.email, state.authUser && state.authUser.email]
+      .filter(Boolean)
+      .map(normalizeEmail);
+    const knownNames = [state.systemUser && state.systemUser.name, state.authUser && state.authUser.displayName]
+      .filter(Boolean)
+      .map(normalizeForSearch);
+
+    return (
+      !name ||
+      /@/.test(name) ||
+      knownEmails.includes(normalized) ||
+      knownNames.includes(searchable) ||
+      /^(voce|você|sua conta|minha conta|conta google|gmail|pix)$/i.test(searchable) ||
+      searchable.length < 3
+    );
+  }
+
+  function extractPixDate(text) {
+    const match = text.match(/(\d{1,2}\/\d{1,2}\/\d{4})(?:\s*(?:às|as|-)?\s*(\d{1,2}:\d{2}))?/i);
+
+    if (!match) return "";
+
+    return `${pad(match[1].split("/")[0])}/${pad(match[1].split("/")[1])}/${match[1].split("/")[2]}${match[2] ? ` ${match[2]}` : ""}`;
+  }
+
+  function formatGmailHeaderDate(value) {
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return "";
+    }
+
+    return new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(date).replace(",", "");
+  }
+
+  function extractNameFromEmailHeader(value) {
+    const text = safeText(value, "");
+    const match = text.match(/^"?([^"<]+)"?\s*</);
+    return tidyName(match ? match[1] : text.replace(/<[^>]+>/g, ""), "");
+  }
+
+  function normalizeEmailText(value) {
+    return stripHtml(safeText(value, ""))
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/\s+\n/g, "\n")
+      .replace(/\n\s+/g, "\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }
+
+  function extractGmailText(payload) {
+    const chunks = [];
+    collectGmailTextParts(payload, chunks);
+    return chunks.join("\n").trim();
+  }
+
+  function collectGmailTextParts(part, chunks) {
+    if (!part) return;
+
+    const mimeType = part.mimeType || "";
+
+    if (part.body && part.body.data && (/text\/plain|text\/html/.test(mimeType) || !part.parts)) {
+      const decoded = decodeGmailBase64(part.body.data);
+      chunks.push(mimeType === "text/html" ? stripHtml(decoded) : decoded);
+    }
+
+    if (Array.isArray(part.parts)) {
+      part.parts.forEach((child) => collectGmailTextParts(child, chunks));
+    }
+  }
+
+  function decodeGmailBase64(value) {
+    try {
+      const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+      const binary = window.atob(normalized);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      return new TextDecoder("utf-8").decode(bytes);
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function stripHtml(value) {
+    return String(value || "")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<[^>]+>/g, " ");
+  }
+
+  async function gmailFetchJson(url, accessToken) {
+    for (let attempt = 0; attempt <= GMAIL_MAX_RETRIES; attempt += 1) {
+      await waitForGmailSlot();
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json"
+        }
+      });
+
+      if (response.ok) {
+        return response.json();
+      }
+
+      const errorText = await response.text();
+
+      if (response.status === 429 && attempt < GMAIL_MAX_RETRIES) {
+        const retryDelay = getGmailRetryDelay(response, attempt);
+        console.warn(`Gmail API 429. Tentando novamente em ${retryDelay}ms (${attempt + 1}/${GMAIL_MAX_RETRIES}).`);
+        await delay(retryDelay);
+        continue;
+      }
+
+      const error = new Error(`Gmail HTTP ${response.status}: ${errorText.slice(0, 180)}`);
+      error.status = response.status;
+      throw error;
+    }
+
+    throw new Error("Gmail API não respondeu após novas tentativas.");
+  }
+
+  async function waitForGmailSlot() {
+    const elapsed = Date.now() - state.lastGmailRequestAt;
+
+    if (elapsed < GMAIL_REQUEST_DELAY_MS) {
+      await delay(GMAIL_REQUEST_DELAY_MS - elapsed);
+    }
+
+    state.lastGmailRequestAt = Date.now();
+  }
+
+  function getGmailRetryDelay(response, attempt) {
+    const retryAfter = Number(response.headers.get("Retry-After"));
+
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000;
+    }
+
+    return GMAIL_REQUEST_DELAY_MS + ((attempt + 1) * 1200);
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function getHeader(headers, name) {
+    const header = headers.find((item) => item.name && item.name.toLocaleLowerCase("pt-BR") === name.toLocaleLowerCase("pt-BR"));
+    return header ? header.value : "";
+  }
+
+  function logGmailPixEmails(emails, pixTransactions) {
+    console.group("Gmail API - e-mails relacionados a Pix");
+    console.log("Usuário:", state.authUser.email);
+    console.log("Escopo:", GMAIL_READONLY_SCOPE);
+    console.log("Consultas:", GMAIL_PIX_QUERIES);
+    console.log(`Mensagens processadas: ${emails.length}`);
+    console.log(`Pix identificados com sucesso: ${pixTransactions.length}`);
+    console.table(pixTransactions.map((pix) => ({
+      tipo: pix.tipo,
+      nome: pix.nome,
+      valor: pix.valor,
+      data: pix.data,
+      emailId: pix.emailId
+    })));
+    console.table(emails.map((email) => ({
+      id: email.id,
+      data: email.date,
+      assunto: email.subject,
+      remetente: email.from,
+      consultas: email.matchedQueries.join(", "),
+      resumo: email.snippet
+    })));
+    console.log("Pix convertidos:", pixTransactions);
+    console.log("E-mails completos:", emails);
+    console.groupEnd();
+  }
+
+  function applyGmailPixToDashboard(options = {}) {
+    state.data = buildGmailFinancialData(state.gmailPixTransactions);
+    state.monthlySeries = [dataToMonthlyPoint(state.data)];
+    state.dataLoaded = true;
+    renderSourceMode();
+    setStatus("Gmail conectado", "success");
+    renderApp();
+  }
+
+  function buildGmailFinancialData(transactions) {
+    const entradas = transactions
+      .filter((pix) => pix.tipo === "recebido")
+      .map(gmailPixToEntrada);
+    const saidas = transactions
+      .filter((pix) => pix.tipo === "enviado")
+      .map(gmailPixToSaida);
+    const historico = entradas.concat(saidas).sort((a, b) => b.timestamp - a.timestamp);
+    const recebido = sumValues(entradas);
+    const gasto = sumValues(saidas);
+    const qtdEntradas = entradas.length;
+    const qtdSaidas = saidas.length;
+    const totalMovements = qtdEntradas + qtdSaidas;
+
+    return {
+      periodo: `Gmail ${pad(state.month)}/${state.year}`,
+      month: state.month,
+      year: state.year,
+      dashboard: {
+        recebido,
+        gasto,
+        saldo: recebido - gasto,
+        ticketMedio: totalMovements ? (recebido + gasto) / totalMovements : 0,
+        qtdEntradas,
+        qtdSaidas,
+        maiorEntrada: maxValue(entradas),
+        maiorGasto: maxValue(saidas)
+      },
+      entradas,
+      saidas,
+      historico,
+      updatedAt: new Date()
+    };
+  }
+
+  function gmailPixToEntrada(pix, index) {
+    return {
+      id: pix.emailId || `gmail-entrada-${index}`,
+      transactionId: pix.emailId || "",
+      index,
+      tipo: "entrada",
+      data: pix.data,
+      timestamp: parseDate(pix.data).getTime() || 0,
+      valor: pix.valor,
+      nome: pix.nome,
+      categoria: pix.categoria || "Recebimentos",
+      descricao: pix.descricao || "Pix identificado no Gmail",
+      raw: pix.raw || pix
+    };
+  }
+
+  function gmailPixToSaida(pix, index) {
+    return {
+      id: pix.emailId || `gmail-saida-${index}`,
+      transactionId: pix.emailId || "",
+      index,
+      tipo: "saida",
+      data: pix.data,
+      timestamp: parseDate(pix.data).getTime() || 0,
+      valor: pix.valor,
+      nome: pix.nome,
+      destino: pix.nome,
+      categoria: pix.categoria || "Gmail / Pix",
+      descricao: pix.descricao || "Pix identificado no Gmail",
+      raw: pix.raw || pix
+    };
+  }
+
+  function getGmailConnectionKey() {
+    const systemEmail = normalizeEmail(state.systemUser && state.systemUser.email);
+    return systemEmail ? `${GMAIL_CONNECTION_PREFIX}${systemEmail}` : "";
+  }
+
+  function saveGmailConnectionMetadata() {
+    const key = getGmailConnectionKey();
+    if (!key || !state.gmailEmail) return false;
+
+    try {
+      window.localStorage.setItem(key, JSON.stringify({
+        gmailConnected: true,
+        gmailEmail: state.gmailEmail,
+        gmailConnectedAt: state.gmailConnectedAt || new Date().toISOString()
+      }));
+      return true;
+    } catch (error) {
+      console.warn("Não foi possível salvar conexão Gmail.", error);
+      return false;
+    }
+  }
+
+  function loadGmailConnectionMetadata() {
+    const key = getGmailConnectionKey();
+    if (!key) return null;
+
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(key) || "null");
+
+      if (!stored || stored.gmailConnected !== true || !stored.gmailEmail) {
+        return null;
+      }
+
+      return {
+        gmailConnected: true,
+        gmailEmail: safeText(stored.gmailEmail, ""),
+        gmailConnectedAt: safeText(stored.gmailConnectedAt, "")
+      };
+    } catch (error) {
+      console.warn("Não foi possível restaurar conexão Gmail.", error);
+      return null;
+    }
+  }
+
+  function restoreGmailConnectionState() {
+    const metadata = loadGmailConnectionMetadata();
+
+    if (!metadata) return false;
+
+    state.gmailConnected = true;
+    state.gmailEmail = metadata.gmailEmail;
+    state.gmailConnectedAt = metadata.gmailConnectedAt;
+    state.gmailSessionExpired = false;
+    loadGmailSessionData();
+    return true;
+  }
+
+  function clearGmailConnectionMetadata() {
+    const key = getGmailConnectionKey();
+
+    if (key) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+
+    Object.keys(window.localStorage)
+      .filter((keyName) => keyName.startsWith(GMAIL_CONNECTION_PREFIX))
+      .forEach((keyName) => window.localStorage.removeItem(keyName));
+  }
+
+  function getGmailSessionKey() {
+    const systemEmail = normalizeEmail(state.systemUser && state.systemUser.email);
+    const gmailEmail = normalizeEmail((state.authUser && state.authUser.email) || state.gmailEmail);
+
+    if (!systemEmail || !gmailEmail) {
+      return "";
+    }
+
+    return `${GMAIL_SESSION_PREFIX}${systemEmail}:${gmailEmail}`;
+  }
+
+  function saveGmailSessionData(transactions) {
+    const key = getGmailSessionKey();
+    if (!key) return false;
+
+    try {
+      const payload = JSON.stringify({
+        systemEmail: state.systemUser.email,
+        gmailEmail: (state.authUser && state.authUser.email) || state.gmailEmail,
+        updatedAt: new Date().toISOString(),
+        transactions
+      });
+      window.sessionStorage.setItem(key, payload);
+      window.localStorage.setItem(key, payload);
+      return true;
+    } catch (error) {
+      console.warn("Não foi possível salvar dados Gmail da sessão.", error);
+      return false;
+    }
+  }
+
+  function loadGmailSessionData() {
+    const key = getGmailSessionKey();
+    if (!key) return false;
+
+    try {
+      const raw = window.sessionStorage.getItem(key) || window.localStorage.getItem(key);
+      const stored = JSON.parse(raw || "null");
+      const transactions = stored && Array.isArray(stored.transactions) ? stored.transactions : [];
+
+      if (!transactions.length) {
+        return false;
+      }
+
+      state.gmailPixTransactions = transactions;
+      return true;
+    } catch (error) {
+      console.warn("Não foi possível carregar dados Gmail da sessão.", error);
+      return false;
+    }
+  }
+
+  function clearStoredGmailSession() {
+    const key = getGmailSessionKey();
+
+    if (key) {
+      window.sessionStorage.removeItem(key);
+      window.localStorage.removeItem(key);
+      return;
+    }
+
+    Object.keys(window.sessionStorage)
+      .filter((keyName) => keyName.startsWith(GMAIL_SESSION_PREFIX))
+      .forEach((keyName) => window.sessionStorage.removeItem(keyName));
+    Object.keys(window.localStorage)
+      .filter((keyName) => keyName.startsWith(GMAIL_SESSION_PREFIX))
+      .forEach((keyName) => window.localStorage.removeItem(keyName));
+  }
+
+  function clearGmailConnection(options = {}) {
+    const { clearData = false, clearStored = false } = options;
+
+    if (clearStored) {
+      clearStoredGmailSession();
+      clearGmailConnectionMetadata();
+    }
+
+    state.gmailAccessToken = "";
+    state.gmailConnected = false;
+    state.gmailEmail = "";
+    state.gmailConnectedAt = "";
+    state.gmailSessionExpired = false;
+    state.gmailFetchInProgress = false;
+    state.lastGmailRequestAt = 0;
+
+    if (clearData) {
+      state.gmailPixTransactions = [];
+    }
+  }
+
+  function isGmailAuthExpiredError(error) {
+    const status = Number(error && error.status);
+    const message = String((error && error.message) || "");
+    return status === 401 || status === 403 || /Gmail HTTP (401|403)/.test(message);
+  }
+
+  function showGmailExpired() {
+    state.gmailAccessToken = "";
+    state.gmailSessionExpired = true;
+    dom.authStatus.textContent = "Sessão do Gmail expirada. Conecte novamente.";
+    showToast("Sessão do Gmail expirada. Conecte novamente.", "error");
+    renderAuthPanel();
+  }
+
+  function renderAuthPanel() {
+    const user = state.authUser;
+    const gmailLabel = state.gmailEmail || (user && user.email) || "";
+    const connectedAt = state.gmailConnectedAt ? formatDateTime(new Date(state.gmailConnectedAt)) : "";
+
+    dom.authUser.hidden = !user;
+    dom.signOutButton.hidden = !user;
+    dom.googleSignInButton.hidden = Boolean(user);
+    dom.connectGmailButton.hidden = !state.accessGranted || (state.gmailConnected && !state.gmailSessionExpired);
+    dom.googleSignInButton.disabled = !isFirebaseConfigured();
+    dom.connectGmailButton.disabled = state.gmailFetchInProgress;
+    dom.connectGmailButton.querySelector("span").textContent = state.gmailSessionExpired ? "Reconectar Gmail" : "Conectar Gmail";
+
+    if (user) {
+      dom.authPhoto.hidden = false;
+      dom.authPhoto.src = user.photoURL || "";
+      dom.authPhoto.alt = `Foto de ${user.displayName || "usuário"}`;
+      dom.authName.textContent = user.displayName || "Usuário Google";
+      dom.authEmail.textContent = user.email || "E-mail não informado";
+      dom.authStatus.textContent = state.gmailSessionExpired
+        ? "Sessão do Gmail expirada. Conecte novamente."
+        : state.gmailConnected
+          ? `Gmail conectado${gmailLabel ? `: ${gmailLabel}` : ""}${connectedAt ? ` desde ${connectedAt}` : ""}.`
+          : "Conta Google conectada.";
+      dom.authPanel.classList.add("is-authenticated");
+    } else if (state.gmailConnected) {
+      dom.authPhoto.src = "";
+      dom.authPhoto.hidden = true;
+      dom.authName.textContent = "Gmail conectado";
+      dom.authEmail.textContent = gmailLabel || "Conta autorizada";
+      dom.authUser.hidden = false;
+      dom.authPanel.classList.add("is-authenticated");
+      dom.authStatus.textContent = state.gmailSessionExpired
+        ? "Sessão do Gmail expirada. Conecte novamente."
+        : `Gmail conectado${connectedAt ? ` desde ${connectedAt}` : ""}.`;
+    } else {
+      dom.authPhoto.src = "";
+      dom.authPhoto.hidden = false;
+      dom.authName.textContent = "Usuário";
+      dom.authEmail.textContent = "";
+      dom.authPanel.classList.remove("is-authenticated");
+      dom.authStatus.textContent = isFirebaseConfigured() ? "Conecte o Gmail quando quiser ler Pix." : "Configure o Firebase para ativar o Gmail.";
+    }
+
+    createIcons();
+  }
+
+  function updateAccessControl() {
+    const user = state.systemUser;
+    const allowed = Boolean(user && isSystemUserAllowed(user.email));
+
+    state.accessGranted = allowed;
+    dom.appShell.classList.toggle("access-locked", !allowed);
+    dom.accessGate.hidden = allowed;
+    if (allowed && !state.gmailConnected) {
+      restoreGmailConnectionState();
+    }
+    renderSystemSession();
+    renderAuthPanel();
+    renderAdmin();
+
+    if (allowed) {
+      dom.accessMessage.textContent = "Acesso liberado. Carregando dashboard financeiro.";
+      dom.accessHint.textContent = user.email;
+      syncFirestoreForCurrentUser();
+      if (!state.dataLoaded) {
+        bootUserDashboard();
+      }
+      return;
+    }
+
+    dom.accessMessage.textContent = "Entre com seu usuário autorizado para acessar o dashboard.";
+    dom.accessHint.textContent = "A conexão Google/Gmail fica disponível após entrar no sistema.";
+    renderInviteGate();
+    setStatus("Aguardando login", "neutral");
+  }
+
+  function renderSystemSession() {
+    const user = state.systemUser;
+
+    dom.systemSession.hidden = !user;
+    if (!user) return;
+
+    dom.systemUserName.textContent = user.name || user.email;
+    dom.systemUserRole.textContent = user.role || "usuário";
+  }
+
+  function bootUserDashboard() {
+    restoreGmailConnectionState();
+
+    if (!isAdminUser()) {
+      state.dataSource = "gmail";
+      saveDataSourcePreference("gmail");
+
+      if (state.gmailPixTransactions.length || loadGmailSessionData()) {
+        applyGmailPixToDashboard({ silent: true });
+      } else {
+        showGmailEmptyState();
+      }
+      return;
+    }
+
+    state.dataSource = loadDataSourcePreference() || "api";
+
+    if (state.dataSource === "gmail") {
+      if (state.gmailPixTransactions.length || loadGmailSessionData()) {
+        applyGmailPixToDashboard({ silent: true });
+      } else if (state.gmailConnected) {
+        showGmailEmptyState();
+      } else {
+        state.dataSource = "api";
+        saveDataSourcePreference("api");
+        loadFinancialData();
+      }
+      return;
+    }
+
+    loadFinancialData();
+  }
+
+  function getDataSourcePreferenceKey() {
+    const email = normalizeEmail(state.systemUser && state.systemUser.email);
+    return email ? `${DATA_SOURCE_PREFIX}${email}` : "";
+  }
+
+  function saveDataSourcePreference(source) {
+    const key = getDataSourcePreferenceKey();
+    if (!key) return;
+
+    try {
+      window.localStorage.setItem(key, source === "gmail" ? "gmail" : "api");
+    } catch (error) {
+      console.warn("Não foi possível salvar preferência de fonte.", error);
+    }
+  }
+
+  function loadDataSourcePreference() {
+    const key = getDataSourcePreferenceKey();
+    if (!key) return "";
+
+    try {
+      const source = window.localStorage.getItem(key);
+      return source === "gmail" || source === "api" ? source : "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function showGmailEmptyState() {
+    state.dataSource = "gmail";
+    state.data = createEmptyData(state.month, state.year);
+    state.monthlySeries = [dataToMonthlyPoint(state.data)];
+    state.dataLoaded = true;
+    state.connection = "Conecte seu Gmail para carregar seus dados.";
+    renderApp();
+    renderAuthPanel();
+    setStatus("Conecte seu Gmail", "neutral");
+    dom.lastUpdated.textContent = "Conecte seu Gmail para carregar seus dados.";
+    dom.authStatus.textContent = state.gmailConnected
+      ? "Gmail conectado. Reconecte para atualizar os e-mails."
+      : "Conecte seu Gmail para carregar seus dados.";
+  }
+
+  function renderAdmin() {
+    const isAdmin = isAdminUser();
+
+    dom.adminNavButton.hidden = !isAdmin;
+
+    if (!dom.adminUsersTable) return;
+
+    dom.adminTotalUsers.textContent = `${USERS.length} ${USERS.length === 1 ? "usuário" : "usuários"}`;
+
+    if (!isAdmin) {
+      dom.adminUsersTable.innerHTML = emptyRow(3);
+      dom.adminInvitesTable.innerHTML = emptyRow(3);
+      return;
+    }
+
+    dom.adminUsersTable.innerHTML = USERS.map((user) => `
+      <tr>
+        <td class="name-cell">${escapeHtml(user.name)}</td>
+        <td>${escapeHtml(user.email)}</td>
+        <td><span class="tag">${escapeHtml(user.role)}</span></td>
+      </tr>
+    `).join("");
+
+    dom.adminInvitesTable.innerHTML = INVITES.length
+      ? INVITES.slice().reverse().map((invite) => `
+        <tr>
+          <td class="name-cell">${escapeHtml(invite.email)}</td>
+          <td><span class="tag">${escapeHtml(invite.role)}</span></td>
+          <td><span class="tx-type ${invite.usedAt ? "saida" : "entrada"}">${invite.usedAt ? "Usado" : "Disponível"}</span></td>
+        </tr>
+      `).join("")
+      : emptyRow(3);
+
+    createIcons();
+  }
+
+  function isAdminUser(user = state.systemUser) {
+    return normalizeUser(user).role === "admin";
+  }
+
+  function normalizeEmail(email) {
+    return String(email || "").trim().toLocaleLowerCase("pt-BR");
+  }
+
+  function isFirebaseConfigured() {
+    return Boolean(
+      FIREBASE_CONFIG &&
+      FIREBASE_CONFIG.apiKey &&
+      FIREBASE_CONFIG.authDomain &&
+      FIREBASE_CONFIG.projectId &&
+      FIREBASE_CONFIG.appId &&
+      !Object.values(FIREBASE_CONFIG).some((value) => String(value || "").startsWith(FIREBASE_PLACEHOLDER))
+    );
+  }
+
+  function friendlyAuthError(error) {
+    const code = error && error.code ? error.code : "";
+    const messages = {
+      "auth/popup-closed-by-user": "janela de login fechada antes de concluir.",
+      "auth/cancelled-popup-request": "já existe uma janela de login aberta.",
+      "auth/popup-blocked": "o navegador bloqueou o popup de login.",
+      "auth/unauthorized-domain": "domínio não autorizado no Firebase Authentication.",
+      "auth/user-mismatch": "a conta escolhida é diferente da conta logada no sistema.",
+      "auth/network-request-failed": "falha de rede ao falar com o Firebase."
+    };
+
+    return messages[code] || (error && error.message) || "erro desconhecido.";
   }
 
   function syncPeriodFromHeader() {
@@ -250,6 +2234,21 @@
   }
 
   async function loadFinancialData(isManualRefresh) {
+    if (!state.accessGranted) {
+      setStatus("Aguardando login", "neutral");
+      if (isManualRefresh) {
+        showToast("Entre com um e-mail autorizado para carregar o dashboard.", "error");
+      }
+      return;
+    }
+
+    if (!isAdminUser()) {
+      state.dataSource = "gmail";
+      saveDataSourcePreference("gmail");
+      showGmailEmptyState();
+      return;
+    }
+
     const loadId = Date.now();
     state.loadId = loadId;
     setLoading(true, "Carregando dados", "Buscando informações do período selecionado");
@@ -263,6 +2262,7 @@
       state.month = state.data.month;
       state.year = state.data.year;
       state.monthlySeries = extractMonthlySeries(payload, state.data);
+      state.dataLoaded = true;
 
       syncHeaderPeriod();
       syncHistoryPeriod();
@@ -277,6 +2277,7 @@
       if (loadId !== state.loadId) return;
       state.data = createEmptyData(state.month, state.year);
       state.monthlySeries = [];
+      state.dataLoaded = false;
       setStatus("Erro na API", "danger");
       renderApp();
       showToast(`Não foi possível carregar a API: ${error.message}`, "error");
@@ -484,7 +2485,9 @@
     renderCategoryFilters();
     renderCategories();
     renderSettings();
+    renderAdmin();
     renderCharts();
+    renderSourceMode();
     createIcons();
   }
 
@@ -981,6 +2984,11 @@
   }
 
   function setActiveSection(section) {
+    if (section === "admin" && !isAdminUser()) {
+      showToast("Admin disponível apenas para usuários admin.", "error");
+      section = "dashboard";
+    }
+
     dom.navLinks.forEach((button) => button.classList.toggle("active", button.dataset.section === section));
     dom.views.forEach((view) => view.classList.toggle("active-view", view.id === section));
     dom.pageTitle.textContent = sectionTitle(section);
@@ -995,7 +3003,8 @@
       realizados: "Pix Realizados",
       historico: "Histórico",
       categorias: "Categorias",
-      configuracoes: "Configurações"
+      configuracoes: "Configurações",
+      admin: "Admin"
     };
     return titles[section] || "Dashboard";
   }
