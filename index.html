@@ -12,6 +12,7 @@
   <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
   <link rel="apple-touch-icon" href="assets/icon-192.png">
   <link id="mainStylesheet" rel="stylesheet" href="style.css">
+  <script id="msalScript" src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.27.0/lib/msal-browser.min.js" defer></script>
   <script src="script.js" defer></script>
   <script id="chartJsScript" src="https://cdn.jsdelivr.net/npm/chart.js" async></script>
   <script id="lucideScript" src="https://unpkg.com/lucide@latest" async></script>
@@ -33,9 +34,18 @@
   <div class="access-gate" id="accessGate">
     <section class="landing-card" id="accessLanding">
       <div class="landing-copy">
+        <div class="login-brand-lockup">
+          <div class="login-brand-mark">
+            <i data-lucide="bar-chart-3"></i>
+          </div>
+          <div>
+            <strong>Financeiro Automático</strong>
+            <span>Seu painel financeiro inteligente</span>
+          </div>
+        </div>
         <p class="eyebrow">Controle financeiro automático</p>
-        <h1>Controle seus Pix automaticamente pelo Gmail</h1>
-        <p>Organize entradas, saídas, metas e relatórios em um painel escuro com cara de app financeiro profissional.</p>
+        <h1>Controle seus Pix automaticamente</h1>
+        <p>Conecte Gmail ou Outlook, leia seus comprovantes de Pix e acompanhe vendas, gastos e saldo em um dashboard pronto para rotina real.</p>
         <div class="landing-actions">
           <button class="google-button login-submit" id="landingLoginButton" type="button">
             <i data-lucide="log-in"></i>
@@ -47,7 +57,7 @@
           </button>
         </div>
         <div class="landing-benefits">
-          <span><i data-lucide="mail-check"></i> Leitura manual do Gmail</span>
+          <span><i data-lucide="mail-check"></i> Gmail e Outlook</span>
           <span><i data-lucide="shield-check"></i> Acesso por convite</span>
           <span><i data-lucide="bar-chart-3"></i> Relatórios e metas</span>
         </div>
@@ -73,11 +83,16 @@
       </div>
     </section>
     <section class="access-card login-card" role="dialog" aria-labelledby="accessTitle" aria-modal="true">
-      <div class="access-icon">
-        <i data-lucide="lock-keyhole"></i>
+      <div class="access-card-header">
+        <div class="access-icon">
+          <i data-lucide="lock-keyhole"></i>
+        </div>
+        <div>
+          <p class="eyebrow">Acesso seguro</p>
+          <h1 id="accessTitle">Financeiro Automático</h1>
+        </div>
       </div>
-      <p class="eyebrow">Acesso restrito</p>
-      <h1 id="accessTitle">Financeiro Automático</h1>
+      <p class="login-impact">Controle seus Pix automaticamente</p>
       <p id="accessMessage">Entre com seu usuário autorizado para acessar o dashboard.</p>
       <form class="login-form" id="systemLoginForm">
         <label class="login-field" for="systemLoginEmail">
@@ -93,6 +108,10 @@
           <i data-lucide="log-in"></i>
           <span>Entrar</span>
         </button>
+        <div class="login-secondary-actions">
+          <button class="link-button" id="forgotPasswordButton" type="button">Esqueci minha senha</button>
+          <button class="link-button" id="loginInviteButton" type="button">Tenho convite</button>
+        </div>
       </form>
       <form class="login-form invite-signup" id="inviteSignupForm" hidden>
         <label class="login-field" for="inviteSignupName">
@@ -114,6 +133,11 @@
         </button>
       </form>
       <span id="accessHint">A conexão Google/Gmail fica disponível após entrar no sistema.</span>
+      <div class="login-provider-strip" aria-label="Fontes compatíveis">
+        <span><i data-lucide="mail"></i> Gmail</span>
+        <span><i data-lucide="mail-plus"></i> Outlook</span>
+        <span><i data-lucide="receipt"></i> Vendas</span>
+      </div>
     </section>
   </div>
 
@@ -174,6 +198,18 @@
           <i data-lucide="badge-dollar-sign"></i>
           <span>Planos</span>
         </button>
+        <button class="nav-link" type="button" data-section="ajuda">
+          <i data-lucide="life-buoy"></i>
+          <span>Ajuda</span>
+        </button>
+        <button class="nav-link" type="button" data-section="faq">
+          <i data-lucide="circle-help"></i>
+          <span>FAQ</span>
+        </button>
+        <button class="nav-link" type="button" data-section="sobre">
+          <i data-lucide="info"></i>
+          <span>Sobre</span>
+        </button>
         <button class="nav-link" type="button" data-section="configuracoes">
           <i data-lucide="settings"></i>
           <span>Configurações</span>
@@ -222,7 +258,7 @@
 
         <button class="gmail-button outlook-button" id="connectOutlookButton" type="button" hidden>
           <i data-lucide="mail-plus"></i>
-          <span>Outlook/Hotmail Beta</span>
+          <span>Conectar Outlook</span>
         </button>
 
         <p id="authStatus">Login Google opcional</p>
@@ -261,6 +297,7 @@
           <div class="source-toggle" aria-label="Fonte dos dados">
             <button class="source-option active" id="apiModeButton" type="button">API</button>
             <button class="source-option" id="gmailModeButton" type="button">Gmail</button>
+            <button class="source-option" id="outlookModeButton" type="button">Outlook</button>
           </div>
           <button class="icon-button primary-button" id="refreshButton" type="button">
             <i data-lucide="refresh-cw"></i>
@@ -284,6 +321,16 @@
 
         <div class="metric-grid" id="metricGrid"></div>
         <div class="budget-alert-panel" id="budgetAlertPanel" hidden></div>
+        <article class="panel source-hub" id="sourceHub">
+          <div class="panel-header">
+            <div>
+              <h3>Conectar fonte de dados</h3>
+              <p>Use e-mails de Pix, vendas manuais ou a API administrativa.</p>
+            </div>
+            <i data-lucide="plug-zap"></i>
+          </div>
+          <div class="source-card-grid" id="sourceCardGrid"></div>
+        </article>
 
         <div class="dashboard-grid">
           <article class="panel panel-large">
@@ -451,6 +498,15 @@
               <option value="all">Todos</option>
               <option value="entrada">Entradas</option>
               <option value="saida">Saídas</option>
+            </select>
+          </label>
+          <label class="field" for="originFilter">
+            <select id="originFilter" aria-label="Origem">
+              <option value="all">Todas origens</option>
+              <option value="gmail">Gmail</option>
+              <option value="outlook">Outlook</option>
+              <option value="venda_manual">Venda manual</option>
+              <option value="api">API admin</option>
             </select>
           </label>
           <label class="field" for="historyMonth">
@@ -866,7 +922,7 @@
             <div class="panel-header">
               <div>
                 <h3>Contas conectadas</h3>
-                <p>Gmail manual ativo e Outlook preparado para futuro</p>
+                <p>Gmail e Outlook/Hotmail ativos para leitura autorizada de Pix</p>
               </div>
               <i data-lucide="mail"></i>
             </div>
@@ -877,6 +933,14 @@
             <div class="setting-row">
               <span>E-mail Gmail</span>
               <strong id="settingsGmailEmail">--</strong>
+            </div>
+            <div class="setting-row">
+              <span>Outlook</span>
+              <strong id="settingsOutlookStatus">Outlook desconectado</strong>
+            </div>
+            <div class="setting-row">
+              <span>E-mail Outlook</span>
+              <strong id="settingsOutlookEmail">--</strong>
             </div>
             <div class="backup-actions">
               <button class="ghost-button" id="settingsConnectGmailButton" type="button">
@@ -889,7 +953,11 @@
               </button>
               <button class="ghost-button" id="settingsOutlookButton" type="button">
                 <i data-lucide="mail-plus"></i>
-                <span>Outlook/Hotmail Beta</span>
+                <span>Conectar Outlook</span>
+              </button>
+              <button class="ghost-button danger-action" id="disconnectOutlookButton" type="button">
+                <i data-lucide="unlink"></i>
+                <span>Desconectar Outlook</span>
               </button>
             </div>
           </article>
@@ -955,6 +1023,90 @@
               <i data-lucide="clipboard-check"></i>
             </div>
             <div class="production-checklist" id="productionChecklist"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="ajuda" aria-labelledby="ajuda-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="ajuda-title">Central de ajuda</h2>
+            <p>Guias rápidos para configurar o Financeiro Automático</p>
+          </div>
+        </div>
+        <div class="help-grid">
+          <article class="panel help-card">
+            <i data-lucide="mail-check"></i>
+            <h3>Conectar e-mails</h3>
+            <p>Entre no sistema, conecte Gmail ou Outlook e clique em atualizar para ler os e-mails de Pix autorizados.</p>
+          </article>
+          <article class="panel help-card">
+            <i data-lucide="shopping-bag"></i>
+            <h3>Lançar venda</h3>
+            <p>Use Vendas para registrar recebimentos manuais. Eles entram automaticamente como receita no dashboard.</p>
+          </article>
+          <article class="panel help-card">
+            <i data-lucide="filter"></i>
+            <h3>Filtrar histórico</h3>
+            <p>Pesquise por nome, categoria, tipo, origem, mês e ano para encontrar qualquer transação rapidamente.</p>
+          </article>
+          <article class="panel help-card">
+            <i data-lucide="shield-check"></i>
+            <h3>Acesso por convite</h3>
+            <p>Novos usuários só entram com convite gerado pelo admin. Convites usados ou cancelados não podem ser reutilizados.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="faq" aria-labelledby="faq-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="faq-title">FAQ</h2>
+            <p>Respostas rápidas para dúvidas comuns</p>
+          </div>
+        </div>
+        <div class="faq-list">
+          <details class="panel faq-item" open>
+            <summary>O sistema salva minha senha do Gmail ou Outlook?</summary>
+            <p>Não. O app usa autorização OAuth. Tokens não são salvos no localStorage e podem expirar, exigindo reconexão.</p>
+          </details>
+          <details class="panel faq-item">
+            <summary>Usuário comum consegue ver a API do admin?</summary>
+            <p>Não. A API antiga só aparece e só carrega para usuários com role admin.</p>
+          </details>
+          <details class="panel faq-item">
+            <summary>O que acontece se o Firestore falhar?</summary>
+            <p>O sistema mantém fallback localStorage para não perder uso básico durante testes.</p>
+          </details>
+          <details class="panel faq-item">
+            <summary>Outlook precisa de configuração?</summary>
+            <p>Sim. É necessário criar um App Registration no Microsoft Entra e informar o Client ID no frontend.</p>
+          </details>
+        </div>
+      </section>
+
+      <section class="view" id="sobre" aria-labelledby="sobre-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="sobre-title">Sobre</h2>
+            <p>Um MVP SaaS para automatizar leitura de Pix</p>
+          </div>
+        </div>
+        <div class="about-grid">
+          <article class="panel about-hero">
+            <span class="total-pill success">MVP SaaS</span>
+            <h3>Financeiro Automático</h3>
+            <p>Dashboard financeiro para consolidar Pix recebidos, Pix enviados, vendas manuais, metas, relatórios e análise inteligente local.</p>
+          </article>
+          <article class="panel help-card">
+            <i data-lucide="lock"></i>
+            <h3>Segurança</h3>
+            <p>Sem secrets no frontend. Usuários entram por login próprio e convites; integrações usam OAuth dos provedores.</p>
+          </article>
+          <article class="panel help-card">
+            <i data-lucide="rocket"></i>
+            <h3>Pronto para teste</h3>
+            <p>Funciona em localhost e Vercel, com Firestore quando disponível e fallback local quando necessário.</p>
           </article>
         </div>
       </section>
@@ -1104,6 +1256,10 @@
         <span>Ajustes</span>
       </button>
     </nav>
+    <button class="sale-fab" id="saleFabButton" type="button" hidden>
+      <i data-lucide="plus"></i>
+      <span>Lançar venda</span>
+    </button>
   </div>
 
   <div class="pix-modal-backdrop" id="pixDetailsModal" hidden>

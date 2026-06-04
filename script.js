@@ -24,10 +24,20 @@
   const USERS_STORAGE_KEY = "financeiroAutomaticoUsers";
   const GMAIL_SESSION_PREFIX = "financeiroAutomaticoGmail:";
   const GMAIL_CONNECTION_PREFIX = "financeiroAutomaticoGmailConnection:";
+  const OUTLOOK_SESSION_PREFIX = "financeiroAutomaticoOutlook:";
+  const OUTLOOK_CONNECTION_PREFIX = "financeiroAutomaticoOutlookConnection:";
   const DATA_SOURCE_PREFIX = "financeiroAutomaticoDataSource:";
   const INVITES_STORAGE_KEY = "financeiroAutomaticoInvites";
   const SALES_STORAGE_PREFIX = "financeiroAutomaticoSales:";
   const SETTINGS_STORAGE_PREFIX = "financeiroAutomaticoSettings:";
+  const MICROSOFT_CLIENT_ID = window.MICROSOFT_CLIENT_ID || "10157c67-792e-4736-b787-14ed995e5d57";
+  const MICROSOFT_TENANT_ID = window.MICROSOFT_TENANT_ID || "1d1013ba-5f55-4f73-b33f-2f76406972ab";
+  const MICROSOFT_REDIRECT_URI = window.MICROSOFT_REDIRECT_URI || window.location.origin;
+  const MICROSOFT_SCOPES = window.MICROSOFT_SCOPES || ["User.Read", "Mail.Read"];
+  const MICROSOFT_AUTHORITY = window.MICROSOFT_AUTHORITY || "https://login.microsoftonline.com/common";
+  const MICROSOFT_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
+  const OUTLOOK_MAX_MESSAGES = 25;
+  const OUTLOOK_PIX_TERMS = ["Pix", "pagamento", "transferencia", "transferência", "recebido", "enviado", "debito", "débito", "credito", "crédito"];
   const USERS = loadUsers();
   const INVITES = loadInvites();
   const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
@@ -91,6 +101,22 @@
     gmailSessionExpired: false,
     gmailFetchInProgress: false,
     lastGmailRequestAt: 0,
+    gmailLastSyncAt: "",
+    gmailLastEmailsFound: 0,
+    gmailLastPixFound: 0,
+    outlookPixTransactions: [],
+    outlookAccessToken: "",
+    outlookAccount: null,
+    outlookMsalClient: null,
+    outlookMsalReady: false,
+    outlookConnected: false,
+    outlookEmail: "",
+    outlookConnectedAt: "",
+    outlookSessionExpired: false,
+    outlookFetchInProgress: false,
+    outlookLastSyncAt: "",
+    outlookLastEmailsFound: 0,
+    outlookLastPixFound: 0,
     manualSales: [],
     allSales: [],
     appSettings: null,
@@ -114,6 +140,7 @@
 
   function init() {
     cacheDom();
+    installGlobalErrorHandlers();
     ensureStylesheetLoaded();
     state.pixDetailsModal = new PixDetailsModal({
       root: dom.pixDetailsModal,
@@ -131,12 +158,31 @@
     bindLibraryEvents();
     renderInviteGate();
     renderAuthPanel();
+    handleOutlookOAuthRedirect().catch((error) => handleGlobalError(error, "Outlook OAuth"));
     dom.apiEndpoint.textContent = API_URL;
     setStatus("Aguardando login", "neutral");
     renderApp();
     updateAccessControl();
     createIcons();
     initGrowthFeatures();
+  }
+
+  function installGlobalErrorHandlers() {
+    if (state.globalErrorHandlersInstalled) return;
+    state.globalErrorHandlersInstalled = true;
+
+    window.addEventListener("error", (event) => {
+      handleGlobalError(event.error || event.message, "Erro global");
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      handleGlobalError(event.reason || "Promise rejeitada", "Erro assíncrono");
+    });
+  }
+
+  function handleGlobalError(error, context = "Aplicação") {
+    const message = error && error.message ? error.message : String(error || "Erro inesperado");
+    console.warn(`${FINANCEIRO_LOG_PREFIX} ${context}: ${message}`, error);
+    if (dom.toast) showToast("Algo falhou, mas o sistema manteve os dados carregados.", "error");
   }
 
   function cacheDom() {
@@ -155,9 +201,11 @@
     dom.refreshButton = document.getElementById("refreshButton");
     dom.apiModeButton = document.getElementById("apiModeButton");
     dom.gmailModeButton = document.getElementById("gmailModeButton");
+    dom.outlookModeButton = document.getElementById("outlookModeButton");
     dom.navLinks = Array.from(document.querySelectorAll(".nav-link"));
     dom.views = Array.from(document.querySelectorAll(".view"));
     dom.metricGrid = document.getElementById("metricGrid");
+    dom.sourceCardGrid = document.getElementById("sourceCardGrid");
     dom.receivedTotal = document.getElementById("receivedTotal");
     dom.receivedCount = document.getElementById("receivedCount");
     dom.sentTotal = document.getElementById("sentTotal");
@@ -170,6 +218,7 @@
     dom.nameSearch = document.getElementById("nameSearch");
     dom.categoryFilter = document.getElementById("categoryFilter");
     dom.typeFilter = document.getElementById("typeFilter");
+    dom.originFilter = document.getElementById("originFilter");
     dom.historyCount = document.getElementById("historyCount");
     dom.receivedPill = document.getElementById("receivedPill");
     dom.sentPill = document.getElementById("sentPill");
@@ -208,6 +257,7 @@
     dom.googleSignInButton = document.getElementById("googleSignInButton");
     dom.signOutButton = document.getElementById("signOutButton");
     dom.connectGmailButton = document.getElementById("connectGmailButton");
+    dom.connectOutlookButton = document.getElementById("connectOutlookButton");
     dom.appShell = document.getElementById("appShell");
     dom.accessGate = document.getElementById("accessGate");
     dom.accessMessage = document.getElementById("accessMessage");
@@ -216,6 +266,8 @@
     dom.systemLoginEmail = document.getElementById("systemLoginEmail");
     dom.systemLoginPassword = document.getElementById("systemLoginPassword");
     dom.systemLoginError = document.getElementById("systemLoginError");
+    dom.forgotPasswordButton = document.getElementById("forgotPasswordButton");
+    dom.loginInviteButton = document.getElementById("loginInviteButton");
     dom.inviteSignupForm = document.getElementById("inviteSignupForm");
     dom.inviteSignupName = document.getElementById("inviteSignupName");
     dom.inviteSignupEmail = document.getElementById("inviteSignupEmail");
@@ -323,7 +375,8 @@
       refreshCurrentSource();
     });
 
-    [dom.nameSearch, dom.categoryFilter, dom.typeFilter].forEach((control) => {
+    [dom.nameSearch, dom.categoryFilter, dom.typeFilter, dom.originFilter].forEach((control) => {
+      if (!control) return;
       control.addEventListener("input", renderHistoryTable);
       control.addEventListener("change", renderHistoryTable);
     });
@@ -346,8 +399,11 @@
     dom.connectGmailButton.addEventListener("click", connectGmailAndSearchPix);
     dom.apiModeButton.addEventListener("click", () => setDataSource("api"));
     dom.gmailModeButton.addEventListener("click", () => setDataSource("gmail"));
+    if (dom.outlookModeButton) dom.outlookModeButton.addEventListener("click", () => setDataSource("outlook"));
     dom.systemLoginForm.addEventListener("submit", handleSystemLogin);
     dom.inviteSignupForm.addEventListener("submit", handleInviteSignup);
+    if (dom.forgotPasswordButton) dom.forgotPasswordButton.addEventListener("click", handleForgotPassword);
+    if (dom.loginInviteButton) dom.loginInviteButton.addEventListener("click", openAccessLogin);
     dom.systemLogoutButton.addEventListener("click", logoutSystem);
     dom.adminUserForm.addEventListener("submit", handleAdminUserSubmit);
   }
@@ -410,16 +466,38 @@
       return;
     }
 
-    state.dataSource = source;
-    saveDataSourcePreference(source);
+    const normalizedSource = source === "outlook" ? "outlook" : source === "api" ? "api" : "gmail";
+    state.dataSource = normalizedSource;
+    saveDataSourcePreference(normalizedSource);
     renderSourceMode();
 
-    if (source === "api") {
+    if (normalizedSource === "api") {
       loadFinancialData(true);
       return;
     }
 
-    if (state.gmailPixTransactions.length || loadGmailSessionData()) {
+    if (normalizedSource === "outlook") {
+      if (state.outlookPixTransactions.length || loadOutlookSessionData()) {
+        applyGmailPixToDashboard();
+        return;
+      }
+
+      if (!state.outlookConnected) {
+        showToast("Conecte o Outlook para usar esta fonte de dados.", "error");
+        connectOutlook();
+        return;
+      }
+
+      if (!state.outlookAccessToken) {
+        showOutlookExpired();
+        return;
+      }
+
+      syncOutlookEmails(true);
+      return;
+    }
+
+    if (state.gmailPixTransactions.length || state.outlookPixTransactions.length || loadGmailSessionData() || loadOutlookSessionData()) {
       applyGmailPixToDashboard();
       return;
     }
@@ -462,17 +540,34 @@
       return;
     }
 
+    if (state.dataSource === "outlook") {
+      if (!state.outlookConnected) {
+        showToast("Conecte o Outlook para atualizar esta fonte.", "error");
+        renderAuthPanel();
+        return;
+      }
+
+      if (!state.outlookAccessToken) {
+        showOutlookExpired();
+        return;
+      }
+
+      syncOutlookEmails(isManualRefresh);
+      return;
+    }
+
     loadFinancialData(isManualRefresh);
   }
 
   function renderSourceMode() {
     dom.apiModeButton.hidden = !isAdminUser();
     dom.apiModeButton.parentElement.classList.toggle("api-hidden", !isAdminUser());
-    if (!isAdminUser() && state.dataSource !== "gmail") {
+    if (!isAdminUser() && state.dataSource === "api") {
       state.dataSource = "gmail";
     }
     dom.apiModeButton.classList.toggle("active", state.dataSource === "api");
     dom.gmailModeButton.classList.toggle("active", state.dataSource === "gmail");
+    if (dom.outlookModeButton) dom.outlookModeButton.classList.toggle("active", state.dataSource === "outlook");
   }
 
   function handleSystemLogin(event) {
@@ -491,6 +586,7 @@
 
     if (state.systemUser && normalizeEmail(state.systemUser.email) !== email) {
       clearGmailConnection({ clearData: true });
+      clearOutlookConnection({ clearData: true });
       state.data = createEmptyData(state.month, state.year);
       state.monthlySeries = [];
       state.dataLoaded = false;
@@ -515,8 +611,16 @@
     showToast(`Bem-vindo, ${state.systemUser.name}.`);
   }
 
+  function handleForgotPassword() {
+    dom.systemLoginError.hidden = true;
+    dom.accessMessage.textContent = "Recuperação de senha";
+    dom.accessHint.textContent = "Por enquanto, peça ao administrador para alterar sua senha em Configurações/Admin.";
+    showToast("MVP fechado: solicite ao admin a troca da senha.");
+  }
+
   function logoutSystem() {
     clearGmailConnection({ clearData: true });
+    clearOutlookConnection({ clearData: true });
     clearSystemSession();
     state.systemUser = null;
     state.accessGranted = false;
@@ -933,8 +1037,8 @@
         }
       }
 
-      if (state.gmailPixTransactions.length) {
-        await saveTransactionsToFirestore(state.gmailPixTransactions);
+      if (state.gmailPixTransactions.length || state.outlookPixTransactions.length) {
+        await saveTransactionsToFirestore(getEmailPixTransactions());
       }
       if (state.manualSales.length) {
         for (const sale of state.manualSales) {
@@ -1064,10 +1168,17 @@
 
     if (!transactions.length) return false;
 
-    state.gmailPixTransactions = transactions.sort((a, b) => (parseDate(b.data).getTime() || 0) - (parseDate(a.data).getTime() || 0));
+    const sorted = transactions.sort((a, b) => {
+      const bDate = parseGrowthDate(b.data) || parseDate(b.data);
+      const aDate = parseGrowthDate(a.data) || parseDate(a.data);
+      return (bDate?.getTime() || 0) - (aDate?.getTime() || 0);
+    });
+    state.gmailPixTransactions = sorted.filter((transaction) => transaction.origem !== "outlook");
+    state.outlookPixTransactions = sorted.filter((transaction) => transaction.origem === "outlook");
     saveGmailSessionData(state.gmailPixTransactions);
+    saveOutlookSessionData(state.outlookPixTransactions);
 
-    if (state.dataSource === "gmail") {
+    if (state.dataSource === "gmail" || state.dataSource === "outlook") {
       applyGmailPixToDashboard({ silent: true });
     }
 
@@ -1155,18 +1266,23 @@
   }
 
   function toFirestoreTransaction(transaction) {
-    const gmailMessageId = transaction.gmailMessageId || transaction.emailId || transaction.id || "";
+    const source = transaction.origem || (transaction.outlookMessageId ? "outlook" : "gmail");
+    const gmailMessageId = source === "outlook" ? "" : transaction.gmailMessageId || transaction.emailId || transaction.id || "";
+    const outlookMessageId = source === "outlook" ? transaction.outlookMessageId || transaction.emailId || transaction.id || "" : "";
 
     return {
-      id: transaction.id || gmailMessageId || transaction.hash || "",
+      id: transaction.id || gmailMessageId || outlookMessageId || transaction.hash || "",
       tipo: transaction.tipo,
       nome: transaction.nome || transaction.destino || "",
       valor: Number(transaction.valor) || 0,
       data: transaction.data || "",
-      categoria: transaction.categoria || "Gmail / Pix",
+      categoria: transaction.categoria || "E-mail / Pix",
       banco: transaction.banco || transaction.origemPix || transaction.origem || "",
-      origem: "gmail",
+      origem: source,
+      messageId: transaction.messageId || gmailMessageId || outlookMessageId || transaction.emailId || "",
+      emailOrigem: transaction.emailOrigem || transaction.from || "",
       gmailMessageId,
+      outlookMessageId,
       hash: transaction.hash || createPixHash(`${transaction.tipo}|${transaction.nome}|${transaction.valor}|${transaction.data}`),
       rawSnippet: transaction.rawSnippet || transaction.snippet || "",
       createdAt: new Date().toISOString()
@@ -1175,18 +1291,24 @@
 
   function normalizeFirestoreTransaction(id, data) {
     if (!data || typeof data !== "object") return null;
+    const source = safeText(data.origem, data.outlookMessageId ? "outlook" : "gmail");
+    const gmailMessageId = source === "outlook" ? "" : safeText(data.gmailMessageId || data.emailId, "");
+    const outlookMessageId = source === "outlook" ? safeText(data.outlookMessageId || data.messageId || data.emailId, id) : "";
 
     return {
       id,
-      emailId: safeText(data.gmailMessageId, id),
-      gmailMessageId: safeText(data.gmailMessageId, id),
+      emailId: safeText(data.messageId || gmailMessageId || outlookMessageId, id),
+      gmailMessageId,
+      outlookMessageId,
       tipo: data.tipo === "enviado" || data.tipo === "saida" ? "enviado" : "recebido",
       nome: safeText(data.nome, "Transação Pix"),
       valor: Number(data.valor) || 0,
       data: safeText(data.data, ""),
-      categoria: safeText(data.categoria, "Gmail / Pix"),
+      categoria: safeText(data.categoria, "E-mail / Pix"),
       banco: safeText(data.banco, ""),
-      origem: safeText(data.origem, "gmail"),
+      origem: source,
+      messageId: safeText(data.messageId || gmailMessageId || outlookMessageId, id),
+      emailOrigem: safeText(data.emailOrigem, ""),
       hash: safeText(data.hash, ""),
       rawSnippet: safeText(data.rawSnippet, ""),
       descricao: `Pix identificado no ${safeText(data.origem, "gmail")}`,
@@ -1195,7 +1317,7 @@
   }
 
   function getTransactionFirestoreId(transaction, index) {
-    const base = transaction.gmailMessageId || transaction.emailId || transaction.hash || transaction.id || transaction.transactionId || `${transaction.tipo}-${transaction.data}-${transaction.nome}-${transaction.valor}-${index}`;
+    const base = transaction.gmailMessageId || transaction.outlookMessageId || transaction.messageId || transaction.emailId || transaction.hash || transaction.id || transaction.transactionId || `${transaction.tipo}-${transaction.data}-${transaction.nome}-${transaction.valor}-${index}`;
     return encodeURIComponent(String(base).replace(/\//g, "-")).slice(0, 420);
   }
 
@@ -1329,9 +1451,13 @@
       const pixTransactions = extractPixTransactionsFromEmails(emails);
 
       state.gmailPixTransactions = pixTransactions;
+      state.gmailLastSyncAt = new Date().toISOString();
+      state.gmailLastEmailsFound = emails.length;
+      state.gmailLastPixFound = pixTransactions.length;
       state.dataSource = "gmail";
       saveDataSourcePreference("gmail");
       saveGmailSessionData(pixTransactions);
+      saveGmailConnectionMetadata();
       saveTransactionsToFirestore(pixTransactions);
       logGmailPixEmails(emails, pixTransactions);
       applyGmailPixToDashboard();
@@ -1633,7 +1759,7 @@
     const name = safeText(value, "");
     const normalized = normalizeEmail(name);
     const searchable = normalizeForSearch(name);
-    const knownEmails = [state.systemUser && state.systemUser.email, state.authUser && state.authUser.email]
+    const knownEmails = [state.systemUser && state.systemUser.email, state.authUser && state.authUser.email, state.gmailEmail, state.outlookEmail]
       .filter(Boolean)
       .map(normalizeEmail);
     const knownNames = [state.systemUser && state.systemUser.name, state.authUser && state.authUser.displayName]
@@ -1820,20 +1946,61 @@
   }
 
   function applyGmailPixToDashboard(options = {}) {
-    state.data = buildGmailFinancialData(state.gmailPixTransactions);
+    state.data = buildGmailFinancialData(getEmailPixTransactions());
     state.monthlySeries = [dataToMonthlyPoint(state.data)];
     state.dataLoaded = true;
     renderSourceMode();
-    setStatus("Gmail conectado", "success");
+    setStatus("E-mails conectados", "success");
     renderApp();
+  }
+
+  function getEmailPixTransactions() {
+    return dedupeEmailTransactions([
+      ...(Array.isArray(state.gmailPixTransactions) ? state.gmailPixTransactions : []),
+      ...(Array.isArray(state.outlookPixTransactions) ? state.outlookPixTransactions : [])
+    ]);
+  }
+
+  function dedupeEmailTransactions(transactions) {
+    const map = new Map();
+    const canonicalKeys = new Set();
+    (Array.isArray(transactions) ? transactions : []).forEach((transaction) => {
+      const source = transaction.origem || (transaction.outlookMessageId ? "outlook" : "gmail");
+      const messageId = transaction.gmailMessageId || transaction.outlookMessageId || transaction.emailId || transaction.id || "";
+      const canonicalKey = getEmailTransactionCanonicalKey(transaction);
+      if (canonicalKey && canonicalKeys.has(canonicalKey)) return;
+      if (canonicalKey) canonicalKeys.add(canonicalKey);
+      const fallback = `${normalizeEmailTransactionType(transaction.tipo)}|${transaction.data || ""}|${transaction.valor || ""}|${normalizeForSearch(transaction.nome || "")}`;
+      const key = `${source}|${messageId || transaction.hash || fallback}`;
+      if (key) map.set(key, { ...transaction, origem: source });
+    });
+    return Array.from(map.values()).sort((a, b) => {
+      const bDate = parseGrowthDate(b.data) || parseDate(b.data);
+      const aDate = parseGrowthDate(a.data) || parseDate(a.data);
+      return (bDate?.getTime() || 0) - (aDate?.getTime() || 0);
+    });
+  }
+
+  function normalizeEmailTransactionType(type) {
+    return type === "entrada" || type === "recebido" ? "entrada" : type === "saida" || type === "enviado" ? "saida" : "";
+  }
+
+  function getEmailTransactionCanonicalKey(transaction) {
+    if (!transaction) return "";
+    const type = normalizeEmailTransactionType(transaction.tipo);
+    const name = normalizeForSearch(transaction.nome || transaction.destino || "");
+    const value = Number(transaction.valor) || 0;
+    const date = String(transaction.data || "").slice(0, 16);
+    if (!type || !name || !value || !date) return "";
+    return `${type}|${date}|${value.toFixed(2)}|${name}`;
   }
 
   function buildGmailFinancialData(transactions) {
     const entradas = transactions
-      .filter((pix) => pix.tipo === "recebido")
+      .filter((pix) => normalizeEmailTransactionType(pix.tipo) === "entrada")
       .map(gmailPixToEntrada);
     const saidas = transactions
-      .filter((pix) => pix.tipo === "enviado")
+      .filter((pix) => normalizeEmailTransactionType(pix.tipo) === "saida")
       .map(gmailPixToSaida);
     const historico = entradas.concat(saidas).sort((a, b) => b.timestamp - a.timestamp);
     const recebido = sumValues(entradas);
@@ -1843,7 +2010,7 @@
     const totalMovements = qtdEntradas + qtdSaidas;
 
     return {
-      periodo: `Gmail ${pad(state.month)}/${state.year}`,
+      periodo: `E-mails ${pad(state.month)}/${state.year}`,
       month: state.month,
       year: state.year,
       dashboard: {
@@ -1875,9 +2042,12 @@
       nome: pix.nome,
       categoria: pix.categoria || "Recebimentos",
       descricao: pix.descricao || "Pix identificado no Gmail",
-      origem: "gmail",
+      origem: pix.origem || (pix.outlookMessageId ? "outlook" : "gmail"),
       banco: pix.banco || "",
-      gmailMessageId: pix.gmailMessageId || pix.emailId || "",
+      messageId: pix.messageId || pix.outlookMessageId || pix.gmailMessageId || pix.emailId || "",
+      emailOrigem: pix.emailOrigem || pix.from || "",
+      gmailMessageId: pix.origem === "outlook" ? "" : pix.gmailMessageId || pix.emailId || "",
+      outlookMessageId: pix.outlookMessageId || "",
       hash: pix.hash || "",
       rawSnippet: pix.rawSnippet || pix.snippet || "",
       raw: pix.raw || pix
@@ -1897,9 +2067,12 @@
       destino: pix.nome,
       categoria: pix.categoria || "Gmail / Pix",
       descricao: pix.descricao || "Pix identificado no Gmail",
-      origem: "gmail",
+      origem: pix.origem || (pix.outlookMessageId ? "outlook" : "gmail"),
       banco: pix.banco || "",
-      gmailMessageId: pix.gmailMessageId || pix.emailId || "",
+      messageId: pix.messageId || pix.outlookMessageId || pix.gmailMessageId || pix.emailId || "",
+      emailOrigem: pix.emailOrigem || pix.from || "",
+      gmailMessageId: pix.origem === "outlook" ? "" : pix.gmailMessageId || pix.emailId || "",
+      outlookMessageId: pix.outlookMessageId || "",
       hash: pix.hash || "",
       rawSnippet: pix.rawSnippet || pix.snippet || "",
       raw: pix.raw || pix
@@ -1919,7 +2092,10 @@
       window.localStorage.setItem(key, JSON.stringify({
         gmailConnected: true,
         gmailEmail: state.gmailEmail,
-        gmailConnectedAt: state.gmailConnectedAt || new Date().toISOString()
+        gmailConnectedAt: state.gmailConnectedAt || new Date().toISOString(),
+        gmailLastSyncAt: state.gmailLastSyncAt || "",
+        gmailLastEmailsFound: Number(state.gmailLastEmailsFound) || 0,
+        gmailLastPixFound: Number(state.gmailLastPixFound) || 0
       }));
       if (state.systemUser) {
         state.appSettings = normalizeAppSettings({
@@ -1929,6 +2105,9 @@
           gmailConnected: true,
           gmailEmail: state.gmailEmail,
           gmailConnectedAt: state.gmailConnectedAt || new Date().toISOString(),
+          gmailLastSyncAt: state.gmailLastSyncAt || "",
+          gmailLastEmailsFound: Number(state.gmailLastEmailsFound) || 0,
+          gmailLastPixFound: Number(state.gmailLastPixFound) || 0,
           updatedAt: new Date().toISOString()
         });
         saveSettingsToLocal(state.appSettings);
@@ -1955,7 +2134,10 @@
       return {
         gmailConnected: true,
         gmailEmail: safeText(stored.gmailEmail, ""),
-        gmailConnectedAt: safeText(stored.gmailConnectedAt, "")
+        gmailConnectedAt: safeText(stored.gmailConnectedAt, ""),
+        gmailLastSyncAt: safeText(stored.gmailLastSyncAt, ""),
+        gmailLastEmailsFound: Number(stored.gmailLastEmailsFound) || 0,
+        gmailLastPixFound: Number(stored.gmailLastPixFound) || 0
       };
     } catch (error) {
       console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível restaurar conexão Gmail.`, error);
@@ -1971,6 +2153,9 @@
     state.gmailConnected = true;
     state.gmailEmail = metadata.gmailEmail;
     state.gmailConnectedAt = metadata.gmailConnectedAt;
+    state.gmailLastSyncAt = metadata.gmailLastSyncAt || "";
+    state.gmailLastEmailsFound = Number(metadata.gmailLastEmailsFound) || 0;
+    state.gmailLastPixFound = Number(metadata.gmailLastPixFound) || 0;
     state.gmailSessionExpired = false;
     loadGmailSessionData();
     return true;
@@ -2093,18 +2278,701 @@
     renderAuthPanel();
   }
 
+  function isMicrosoftConfigured() {
+    return Boolean(MICROSOFT_CLIENT_ID && !MICROSOFT_CLIENT_ID.includes("COLE_SEU"));
+  }
+
+  function getOutlookConnectionKey() {
+    const systemEmail = normalizeEmail(state.systemUser && state.systemUser.email);
+    return systemEmail ? `${OUTLOOK_CONNECTION_PREFIX}${systemEmail}` : "";
+  }
+
+  function getOutlookSessionKey() {
+    const systemEmail = normalizeEmail(state.systemUser && state.systemUser.email);
+    const outlookEmail = normalizeEmail(state.outlookEmail);
+    return systemEmail && outlookEmail ? `${OUTLOOK_SESSION_PREFIX}${systemEmail}:${outlookEmail}` : "";
+  }
+
+  function saveOutlookConnectionMetadata() {
+    const key = getOutlookConnectionKey();
+    if (!key || !state.outlookEmail) return false;
+
+    try {
+      window.localStorage.setItem(key, JSON.stringify({
+        outlookConnected: true,
+        outlookEmail: state.outlookEmail,
+        outlookConnectedAt: state.outlookConnectedAt || new Date().toISOString()
+      }));
+      if (state.systemUser) {
+        state.appSettings = normalizeAppSettings({
+          ...(state.appSettings || {}),
+          email: state.systemUser.email,
+          name: state.systemUser.name,
+          outlookConnected: true,
+          outlookEmail: state.outlookEmail,
+          outlookConnectedAt: state.outlookConnectedAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        saveSettingsToLocal(state.appSettings);
+        saveSettingsToFirestore(state.appSettings);
+      }
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar conexão Outlook.`, error);
+      return false;
+    }
+  }
+
+  function loadOutlookConnectionMetadata() {
+    const key = getOutlookConnectionKey();
+    if (!key) return null;
+
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(key) || "null");
+      if (!stored || stored.outlookConnected !== true || !stored.outlookEmail) return null;
+      return {
+        outlookConnected: true,
+        outlookEmail: safeText(stored.outlookEmail, ""),
+        outlookConnectedAt: safeText(stored.outlookConnectedAt, "")
+      };
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível restaurar conexão Outlook.`, error);
+      return null;
+    }
+  }
+
+  function restoreOutlookConnectionState() {
+    const metadata = loadOutlookConnectionMetadata();
+    if (!metadata) return false;
+
+    state.outlookConnected = true;
+    state.outlookEmail = metadata.outlookEmail;
+    state.outlookConnectedAt = metadata.outlookConnectedAt;
+    state.outlookSessionExpired = false;
+    loadOutlookSessionData();
+    return true;
+  }
+
+  function saveOutlookSessionData(transactions) {
+    const key = getOutlookSessionKey();
+    if (!key) return false;
+
+    try {
+      const payload = JSON.stringify({
+        systemEmail: state.systemUser.email,
+        outlookEmail: state.outlookEmail,
+        updatedAt: new Date().toISOString(),
+        transactions
+      });
+      window.sessionStorage.setItem(key, payload);
+      window.localStorage.setItem(key, payload);
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar dados Outlook da sessão.`, error);
+      return false;
+    }
+  }
+
+  function loadOutlookSessionData() {
+    const key = getOutlookSessionKey();
+    if (!key) return false;
+
+    try {
+      const raw = window.sessionStorage.getItem(key) || window.localStorage.getItem(key);
+      const stored = JSON.parse(raw || "null");
+      const transactions = stored && Array.isArray(stored.transactions) ? stored.transactions : [];
+      if (!transactions.length) return false;
+      state.outlookPixTransactions = transactions.map((transaction) => ({ ...transaction, origem: "outlook" }));
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível carregar dados Outlook da sessão.`, error);
+      return false;
+    }
+  }
+
+  function clearStoredOutlookSession() {
+    const key = getOutlookSessionKey();
+    if (key) {
+      window.sessionStorage.removeItem(key);
+      window.localStorage.removeItem(key);
+      return;
+    }
+
+    Object.keys(window.sessionStorage)
+      .filter((keyName) => keyName.startsWith(OUTLOOK_SESSION_PREFIX))
+      .forEach((keyName) => window.sessionStorage.removeItem(keyName));
+    Object.keys(window.localStorage)
+      .filter((keyName) => keyName.startsWith(OUTLOOK_SESSION_PREFIX))
+      .forEach((keyName) => window.localStorage.removeItem(keyName));
+  }
+
+  function clearOutlookConnectionMetadata() {
+    const key = getOutlookConnectionKey();
+    if (key) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+
+    Object.keys(window.localStorage)
+      .filter((keyName) => keyName.startsWith(OUTLOOK_CONNECTION_PREFIX))
+      .forEach((keyName) => window.localStorage.removeItem(keyName));
+  }
+
+  function clearOutlookConnection(options = {}) {
+    const { clearData = false, clearStored = false } = options;
+    if (clearStored) {
+      clearStoredOutlookSession();
+      clearOutlookConnectionMetadata();
+    }
+    state.outlookAccessToken = "";
+    state.outlookConnected = false;
+    state.outlookEmail = "";
+    state.outlookConnectedAt = "";
+    state.outlookSessionExpired = false;
+    state.outlookFetchInProgress = false;
+    if (clearData) state.outlookPixTransactions = [];
+  }
+
+  function showOutlookExpired() {
+    state.outlookAccessToken = "";
+    state.outlookSessionExpired = true;
+    dom.authStatus.textContent = "Sessão do Outlook expirada. Conecte novamente.";
+    showToast("Sessão do Outlook expirada. Conecte novamente.", "error");
+    renderAuthPanel();
+  }
+
+  function isMsalLoaded() {
+    return Boolean(window.msal && window.msal.PublicClientApplication);
+  }
+
+  function getMsalCacheLocation() {
+    return window.msal && window.msal.BrowserCacheLocation && window.msal.BrowserCacheLocation.MemoryStorage
+      ? window.msal.BrowserCacheLocation.MemoryStorage
+      : "memoryStorage";
+  }
+
+  async function initOutlookMsal() {
+    if (!isMicrosoftConfigured()) {
+      throw new Error("Microsoft Client ID nao configurado.");
+    }
+
+    if (!isMsalLoaded()) {
+      throw new Error("MSAL.js ainda nao carregou. Recarregue a pagina e tente novamente.");
+    }
+
+    if (!state.outlookMsalClient) {
+      state.outlookMsalClient = new window.msal.PublicClientApplication({
+        auth: {
+          clientId: MICROSOFT_CLIENT_ID,
+          authority: MICROSOFT_AUTHORITY,
+          redirectUri: MICROSOFT_REDIRECT_URI,
+          navigateToLoginRequestUrl: false
+        },
+        cache: {
+          cacheLocation: getMsalCacheLocation(),
+          temporaryCacheLocation: "sessionStorage",
+          storeAuthStateInCookie: false
+        },
+        system: {
+          loggerOptions: {
+            logLevel: window.msal.LogLevel ? window.msal.LogLevel.Error : 0,
+            piiLoggingEnabled: false
+          }
+        }
+      });
+    }
+
+    if (!state.outlookMsalReady && typeof state.outlookMsalClient.initialize === "function") {
+      await state.outlookMsalClient.initialize();
+    }
+
+    state.outlookMsalReady = true;
+    const account = getSelectedOutlookAccount();
+    if (account && typeof state.outlookMsalClient.setActiveAccount === "function") {
+      state.outlookMsalClient.setActiveAccount(account);
+    }
+    return state.outlookMsalClient;
+  }
+
+  function saveOutlookConnectionMetadata() {
+    const key = getOutlookConnectionKey();
+    if (!key || !state.outlookEmail) return false;
+
+    try {
+      const connectedAt = state.outlookConnectedAt || new Date().toISOString();
+      const payload = {
+        outlookConnected: true,
+        outlookEmail: state.outlookEmail,
+        outlookConnectedAt: connectedAt,
+        outlookLastSyncAt: state.outlookLastSyncAt || "",
+        outlookLastEmailsFound: Number(state.outlookLastEmailsFound) || 0,
+        outlookLastPixFound: Number(state.outlookLastPixFound) || 0
+      };
+      window.localStorage.setItem(key, JSON.stringify(payload));
+      if (state.systemUser) {
+        state.appSettings = normalizeAppSettings({
+          ...(state.appSettings || {}),
+          email: state.systemUser.email,
+          name: state.systemUser.name,
+          ...payload,
+          updatedAt: new Date().toISOString()
+        });
+        saveSettingsToLocal(state.appSettings);
+        saveSettingsToFirestore(state.appSettings);
+      }
+      return true;
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Nao foi possivel salvar conexao Outlook.`, error);
+      return false;
+    }
+  }
+
+  function loadOutlookConnectionMetadata() {
+    const key = getOutlookConnectionKey();
+    if (!key) return null;
+
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(key) || "null");
+      if (!stored || stored.outlookConnected !== true || !stored.outlookEmail) return null;
+      return {
+        outlookConnected: true,
+        outlookEmail: safeText(stored.outlookEmail, ""),
+        outlookConnectedAt: safeText(stored.outlookConnectedAt, ""),
+        outlookLastSyncAt: safeText(stored.outlookLastSyncAt, ""),
+        outlookLastEmailsFound: Number(stored.outlookLastEmailsFound) || 0,
+        outlookLastPixFound: Number(stored.outlookLastPixFound) || 0
+      };
+    } catch (error) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Nao foi possivel restaurar conexao Outlook.`, error);
+      return null;
+    }
+  }
+
+  function restoreOutlookConnectionState() {
+    const metadata = loadOutlookConnectionMetadata();
+    if (!metadata) return false;
+
+    state.outlookConnected = true;
+    state.outlookEmail = metadata.outlookEmail;
+    state.outlookConnectedAt = metadata.outlookConnectedAt;
+    state.outlookLastSyncAt = metadata.outlookLastSyncAt || "";
+    state.outlookLastEmailsFound = Number(metadata.outlookLastEmailsFound) || 0;
+    state.outlookLastPixFound = Number(metadata.outlookLastPixFound) || 0;
+    state.outlookSessionExpired = false;
+    loadOutlookSessionData();
+    return true;
+  }
+
+  function clearOutlookConnection(options = {}) {
+    const { clearData = false, clearStored = false } = options;
+    if (clearStored) {
+      clearStoredOutlookSession();
+      clearOutlookConnectionMetadata();
+    }
+    state.outlookAccessToken = "";
+    state.outlookAccount = null;
+    state.outlookConnected = false;
+    state.outlookEmail = "";
+    state.outlookConnectedAt = "";
+    state.outlookSessionExpired = false;
+    state.outlookFetchInProgress = false;
+    if (clearData) state.outlookPixTransactions = [];
+  }
+
+  function showOutlookExpired() {
+    state.outlookAccessToken = "";
+    state.outlookSessionExpired = true;
+    dom.authStatus.textContent = "Sessao do Outlook expirada. Reconecte Outlook.";
+    showToast("Sessao do Outlook expirada. Reconecte Outlook.", "error");
+    renderAuthPanel();
+  }
+
+  async function connectOutlook() {
+    if (state.outlookFetchInProgress) {
+      showToast("Busca no Outlook ja esta em andamento.");
+      return [];
+    }
+
+    if (!state.accessGranted) {
+      showToast("Entre no sistema antes de conectar Outlook.", "error");
+      return [];
+    }
+
+    if (state.outlookConnected && state.outlookAccessToken && !state.outlookSessionExpired) {
+      return syncOutlookEmails(true);
+    }
+
+    if (!isMicrosoftConfigured()) {
+      console.warn(`${FINANCEIRO_LOG_PREFIX} Microsoft Client ID nao configurado.`, { tenantId: MICROSOFT_TENANT_ID });
+      showToast("Configure o Microsoft Client ID para ativar Outlook.", "error");
+      return [];
+    }
+
+    state.outlookFetchInProgress = true;
+    renderAuthPanel();
+    setLoading(true, "Conectando Outlook", "Abrindo autorizacao Microsoft.");
+
+    try {
+      const client = await initOutlookMsal();
+      const request = {
+        scopes: MICROSOFT_SCOPES,
+        prompt: "select_account"
+      };
+
+      if (window.MICROSOFT_LOGIN_MODE === "redirect") {
+        await client.loginRedirect(request);
+        return [];
+      }
+
+      const response = await client.loginPopup(request);
+      await completeOutlookConnection(response);
+      await syncOutlookEmails(false);
+      showToast("Outlook conectado com sucesso.");
+      return state.outlookPixTransactions;
+    } catch (error) {
+      logOutlookError("Falha ao conectar Outlook", error);
+      showToast(`Outlook: ${friendlyOutlookError(error)}`, "error");
+      if (!state.outlookEmail && !loadOutlookConnectionMetadata()) {
+        clearOutlookConnection();
+      } else {
+        state.outlookAccessToken = "";
+        state.outlookSessionExpired = true;
+      }
+      return [];
+    } finally {
+      state.outlookFetchInProgress = false;
+      setLoading(false);
+      renderAuthPanel();
+      renderGrowthFeatures();
+    }
+  }
+
+  async function handleOutlookOAuthRedirect() {
+    if (!isMicrosoftConfigured() || !isMsalLoaded()) {
+      return false;
+    }
+
+    try {
+      const client = await initOutlookMsal();
+      if (typeof client.handleRedirectPromise !== "function") return false;
+      const response = await client.handleRedirectPromise();
+      if (!response) return false;
+
+      setLoading(true, "Conectando Outlook", "Validando autorizacao Microsoft.");
+      await completeOutlookConnection(response);
+      await syncOutlookEmails(false);
+      showToast("Outlook conectado com sucesso.");
+      return true;
+    } catch (error) {
+      logOutlookError("Falha no redirect Outlook", error);
+      showToast(`Outlook: ${friendlyOutlookError(error)}`, "error");
+      return false;
+    } finally {
+      setLoading(false);
+      renderAuthPanel();
+      renderGrowthFeatures();
+    }
+  }
+
+  async function completeOutlookConnection(response) {
+    const account = response && response.account ? response.account : getSelectedOutlookAccount();
+    if (!account) {
+      throw new Error("A Microsoft nao retornou a conta selecionada.");
+    }
+
+    state.outlookAccount = account;
+    if (state.outlookMsalClient && typeof state.outlookMsalClient.setActiveAccount === "function") {
+      state.outlookMsalClient.setActiveAccount(account);
+    }
+
+    state.outlookAccessToken = response && response.accessToken ? response.accessToken : await acquireOutlookAccessToken(account);
+    if (!state.outlookAccessToken) {
+      throw new Error("A Microsoft nao retornou token de acesso.");
+    }
+
+    const profile = await getOutlookUser();
+    state.outlookEmail = normalizeEmail(profile.mail || profile.userPrincipalName || account.username || "");
+    state.outlookConnected = true;
+    state.outlookConnectedAt = state.outlookConnectedAt || new Date().toISOString();
+    state.outlookSessionExpired = false;
+    saveOutlookConnectionMetadata();
+    addSystemLog("Outlook conectado", state.outlookEmail || account.username || "Conta Microsoft autorizada");
+    renderAuthPanel();
+  }
+
+  function getSelectedOutlookAccount() {
+    if (state.outlookAccount) return state.outlookAccount;
+    if (!state.outlookMsalClient || typeof state.outlookMsalClient.getAllAccounts !== "function") return null;
+    const active = typeof state.outlookMsalClient.getActiveAccount === "function" ? state.outlookMsalClient.getActiveAccount() : null;
+    const accounts = state.outlookMsalClient.getAllAccounts();
+    const matched = accounts.find((account) => normalizeEmail(account.username) === normalizeEmail(state.outlookEmail));
+    state.outlookAccount = active || matched || accounts[0] || null;
+    return state.outlookAccount;
+  }
+
+  async function acquireOutlookAccessToken(account = getSelectedOutlookAccount()) {
+    const client = await initOutlookMsal();
+    const selectedAccount = account || getSelectedOutlookAccount();
+    if (!selectedAccount) {
+      showOutlookExpired();
+      throw new Error("Conta Outlook nao esta em memoria. Reconecte Outlook.");
+    }
+
+    const request = {
+      scopes: MICROSOFT_SCOPES,
+      account: selectedAccount
+    };
+
+    try {
+      const response = await client.acquireTokenSilent(request);
+      state.outlookAccessToken = response.accessToken || "";
+      state.outlookAccount = response.account || selectedAccount;
+      return state.outlookAccessToken;
+    } catch (error) {
+      if (!isOutlookInteractionRequiredError(error)) throw error;
+      const response = await client.acquireTokenPopup(request);
+      state.outlookAccessToken = response.accessToken || "";
+      state.outlookAccount = response.account || selectedAccount;
+      return state.outlookAccessToken;
+    }
+  }
+
+  async function syncOutlookEmails(isManualRefresh = true) {
+    state.outlookFetchInProgress = true;
+    renderAuthPanel();
+    setLoading(true, "Lendo Outlook", "Buscando e-mails de Pix no Microsoft Graph.");
+    try {
+      state.outlookAccessToken = await acquireOutlookAccessToken();
+      const messages = await fetchOutlookMessages();
+      const parsed = [];
+
+      for (const message of messages) {
+        const transaction = parseOutlookPixEmail(message);
+        if (transaction) parsed.push(transaction);
+      }
+
+      state.outlookPixTransactions = dedupeEmailTransactions([
+        ...state.outlookPixTransactions,
+        ...parsed
+      ]).filter((transaction) => transaction.origem === "outlook");
+      state.outlookLastSyncAt = new Date().toISOString();
+      state.outlookLastEmailsFound = messages.length;
+      state.outlookLastPixFound = parsed.length;
+      saveOutlookSessionData(state.outlookPixTransactions);
+      saveOutlookConnectionMetadata();
+      await saveTransactionsToFirestore(state.outlookPixTransactions);
+      state.dataSource = "outlook";
+      saveDataSourcePreference("outlook");
+      applyGmailPixToDashboard({ silent: true });
+      console.log(`Outlook: ${messages.length} mensagens processadas.`);
+      console.log(`Outlook: ${parsed.length} Pix identificados com sucesso.`);
+      if (isManualRefresh) showToast(`${parsed.length} Pix encontrados no Outlook.`);
+      addSystemLog("sync Outlook", `${parsed.length} Pix identificados em ${messages.length} e-mails`);
+      return parsed;
+    } catch (error) {
+      if (isOutlookAuthExpiredError(error)) {
+        showOutlookExpired();
+      } else {
+        logOutlookError("Falha ao sincronizar Outlook", error);
+        showToast(`Outlook: ${friendlyOutlookError(error)}`, "error");
+      }
+      return [];
+    } finally {
+      state.outlookFetchInProgress = false;
+      setLoading(false);
+      renderAuthPanel();
+      renderGrowthFeatures();
+    }
+  }
+
+  async function fetchOutlookMessages() {
+    const url = new URL(`${MICROSOFT_GRAPH_BASE_URL}/me/messages`);
+    url.searchParams.set("$top", String(OUTLOOK_MAX_MESSAGES));
+    url.searchParams.set("$select", "id,subject,from,receivedDateTime,bodyPreview,internetMessageId");
+    url.searchParams.set("$orderby", "receivedDateTime desc");
+    const payload = await outlookFetchJson(url.toString(), state.outlookAccessToken);
+    const messages = Array.isArray(payload.value) ? payload.value : [];
+    const candidates = messages.filter(matchesOutlookPixTerms).slice(0, OUTLOOK_MAX_MESSAGES);
+    const details = [];
+
+    for (const message of candidates) {
+      try {
+        details.push(await fetchOutlookMessageDetail(message.id));
+      } catch (error) {
+        logOutlookError(`Falha ao detalhar mensagem Outlook ${message.id}`, error);
+        details.push(message);
+      }
+      console.log(`Outlook Graph: ${details.length}/${candidates.length} mensagens processadas.`);
+    }
+
+    return details;
+  }
+
+  async function fetchOutlookMessageDetail(messageId) {
+    const url = new URL(`${MICROSOFT_GRAPH_BASE_URL}/me/messages/${encodeURIComponent(messageId)}`);
+    url.searchParams.set("$select", "id,subject,from,receivedDateTime,bodyPreview,body,internetMessageId");
+    return outlookFetchJson(url.toString(), state.outlookAccessToken);
+  }
+
+  async function getOutlookUser() {
+    if (!state.outlookAccessToken) {
+      state.outlookAccessToken = await acquireOutlookAccessToken();
+    }
+    return outlookFetchJson(`${MICROSOFT_GRAPH_BASE_URL}/me?$select=mail,userPrincipalName,displayName`, state.outlookAccessToken);
+  }
+
+  function matchesOutlookPixTerms(message) {
+    const haystack = normalizeForSearch(`${message.subject || ""} ${message.bodyPreview || ""} ${message.body && message.body.content || ""}`);
+    return OUTLOOK_PIX_TERMS.some((term) => haystack.includes(normalizeForSearch(term)));
+  }
+
+  async function outlookFetchJson(url, accessToken, attempt = 0) {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json"
+      }
+    });
+
+    if (response.ok) return response.json();
+    const text = await response.text();
+    if (response.status === 429 && attempt < 3) {
+      const delayMs = Number(response.headers.get("Retry-After") || 1) * 1000 + 300;
+      await delay(delayMs);
+      return outlookFetchJson(url, accessToken, attempt + 1);
+    }
+
+    let errorMessage = text.slice(0, 220);
+    try {
+      const payload = JSON.parse(text);
+      errorMessage = payload.error && (payload.error.message || payload.error.code) || errorMessage;
+    } catch (error) {
+      // Plain text Graph errors are already safe after truncation.
+    }
+    const err = new Error(`Outlook HTTP ${response.status}: ${errorMessage}`);
+    err.status = response.status;
+    throw err;
+  }
+
+  function parseOutlookPixEmail(message) {
+    const bodyText = stripHtml(message.body && message.body.content || message.bodyPreview || "");
+    const emailAddress = message.from && message.from.emailAddress ? message.from.emailAddress : {};
+    const from = message.from && message.from.emailAddress
+      ? `${message.from.emailAddress.name || ""} <${message.from.emailAddress.address || ""}>`
+      : "";
+    const normalizedEmail = {
+      id: message.id,
+      subject: message.subject || "",
+      snippet: message.bodyPreview || "",
+      bodyText,
+      from,
+      to: state.outlookEmail,
+      date: message.receivedDateTime,
+      matchedQueries: OUTLOOK_PIX_TERMS
+    };
+    const pix = parsePixEmail(normalizedEmail);
+    if (!pix) return null;
+    const type = pix.tipo === "recebido" || pix.tipo === "entrada" ? "entrada" : "saida";
+    const messageId = message.id || "";
+    const rawSnippet = safeText(message.bodyPreview || bodyText.slice(0, 240), "");
+    return {
+      ...pix,
+      id: messageId || pix.hash,
+      tipo: type,
+      origem: "outlook",
+      banco: pix.banco || "Outlook",
+      emailOrigem: emailAddress.address || "",
+      rawSnippet,
+      messageId,
+      outlookMessageId: messageId,
+      gmailMessageId: "",
+      emailId: messageId,
+      internetMessageId: message.internetMessageId || "",
+      descricao: type === "entrada" ? "Pix recebido via Outlook" : "Pix enviado via Outlook",
+      raw: message
+    };
+  }
+
+  function disconnectOutlook() {
+    clearOutlookConnection({ clearData: false, clearStored: true });
+    state.appSettings = normalizeAppSettings({
+      ...(state.appSettings || {}),
+      outlookConnected: false,
+      outlookEmail: "",
+      outlookConnectedAt: "",
+      updatedAt: new Date().toISOString()
+    });
+    saveSettingsToLocal(state.appSettings);
+    saveSettingsToFirestore(state.appSettings);
+    renderAuthPanel();
+    renderSettingsExtras();
+    showToast("Outlook desconectado deste navegador.");
+  }
+
+  function isOutlookAuthExpiredError(error) {
+    const status = Number(error && error.status);
+    const message = String((error && error.message) || "");
+    return status === 401 || /Outlook HTTP 401|login_required|invalid_grant|no_tokens_found/i.test(message);
+  }
+
+  function isOutlookInteractionRequiredError(error) {
+    if (window.msal && window.msal.InteractionRequiredAuthError && error instanceof window.msal.InteractionRequiredAuthError) {
+      return true;
+    }
+    const code = String(error && (error.errorCode || error.code || ""));
+    const message = String(error && error.message || "");
+    return /interaction_required|consent_required|login_required|no_tokens_found/i.test(`${code} ${message}`);
+  }
+
+  function friendlyOutlookError(error) {
+    const code = String(error && (error.errorCode || error.code || ""));
+    const message = String(error && error.message || "");
+    const combined = `${code} ${message}`.toLowerCase();
+
+    if (/user_cancelled|user_cancelled_login|cancel/i.test(combined)) {
+      return "login cancelado pelo usuario.";
+    }
+    if (/popup_window_error|popup_window|empty_window_error|block/i.test(combined)) {
+      return "o popup da Microsoft foi bloqueado. Libere popups para este site e tente novamente.";
+    }
+    if (/aadsts50011|redirect_uri|reply url/i.test(combined)) {
+      return "redirect URI nao confere com o cadastro no Azure. Use http://localhost:8000 ou https://teste-three-topaz.vercel.app.";
+    }
+    if (/mail\.read|aadsts65001|consent|insufficient privileges|Outlook HTTP 403/i.test(`${code} ${message}`)) {
+      return "a permissao Mail.Read nao foi concedida. Revise as permissoes Microsoft Graph e conecte novamente.";
+    }
+    if (/login_required|no_tokens_found|invalid_grant/i.test(combined)) {
+      return "sessao expirada. Reconecte Outlook.";
+    }
+    return message || "falha na integracao Microsoft Graph.";
+  }
+
+  function logOutlookError(context, error) {
+    console.warn(`${FINANCEIRO_LOG_PREFIX} ${context}.`, {
+      errorCode: error && (error.errorCode || error.code || ""),
+      status: error && error.status,
+      message: error && error.message,
+      stack: error && error.stack
+    });
+  }
+
   function renderAuthPanel() {
     const user = state.authUser;
     const gmailLabel = state.gmailEmail || (user && user.email) || "";
     const connectedAt = state.gmailConnectedAt ? formatDateTime(new Date(state.gmailConnectedAt)) : "";
+    const outlookLabel = state.outlookEmail || "";
+    const outlookConnectedAt = state.outlookConnectedAt ? formatDateTime(new Date(state.outlookConnectedAt)) : "";
 
     dom.authUser.hidden = !user;
     dom.signOutButton.hidden = !user;
     dom.googleSignInButton.hidden = Boolean(user);
     dom.connectGmailButton.hidden = !state.accessGranted || (state.gmailConnected && !state.gmailSessionExpired);
+    if (dom.connectOutlookButton) dom.connectOutlookButton.hidden = !state.accessGranted;
     dom.googleSignInButton.disabled = !isFirebaseConfigured();
     dom.connectGmailButton.disabled = state.gmailFetchInProgress;
+    if (dom.connectOutlookButton) dom.connectOutlookButton.disabled = state.outlookFetchInProgress;
     dom.connectGmailButton.querySelector("span").textContent = state.gmailSessionExpired ? "Reconectar Gmail" : "Conectar Gmail";
+    if (dom.connectOutlookButton) dom.connectOutlookButton.querySelector("span").textContent = state.outlookSessionExpired ? "Reconectar Outlook" : state.outlookConnected && state.outlookAccessToken ? "Atualizar Outlook" : state.outlookConnected ? "Reconectar Outlook" : "Conectar Outlook";
 
     if (user) {
       dom.authPhoto.hidden = false;
@@ -2112,32 +2980,35 @@
       dom.authPhoto.alt = `Foto de ${user.displayName || "usuário"}`;
       dom.authName.textContent = user.displayName || "Usuário Google";
       dom.authEmail.textContent = user.email || "E-mail não informado";
-      dom.authStatus.textContent = state.gmailSessionExpired
-        ? "Sessão do Gmail expirada. Conecte novamente."
-        : state.gmailConnected
-          ? `Gmail conectado${gmailLabel ? `: ${gmailLabel}` : ""}${connectedAt ? ` desde ${connectedAt}` : ""}.`
-          : "Conta Google conectada.";
+      dom.authStatus.textContent = buildEmailStatusText(gmailLabel, connectedAt, outlookLabel, outlookConnectedAt, "Conta Google conectada.");
       dom.authPanel.classList.add("is-authenticated");
-    } else if (state.gmailConnected) {
+    } else if (state.gmailConnected || state.outlookConnected) {
       dom.authPhoto.src = "";
       dom.authPhoto.hidden = true;
-      dom.authName.textContent = "Gmail conectado";
-      dom.authEmail.textContent = gmailLabel || "Conta autorizada";
+      dom.authName.textContent = state.gmailConnected && state.outlookConnected ? "E-mails conectados" : state.gmailConnected ? "Gmail conectado" : "Outlook conectado";
+      dom.authEmail.textContent = gmailLabel || outlookLabel || "Conta autorizada";
       dom.authUser.hidden = false;
       dom.authPanel.classList.add("is-authenticated");
-      dom.authStatus.textContent = state.gmailSessionExpired
-        ? "Sessão do Gmail expirada. Conecte novamente."
-        : `Gmail conectado${connectedAt ? ` desde ${connectedAt}` : ""}.`;
+      dom.authStatus.textContent = buildEmailStatusText(gmailLabel, connectedAt, outlookLabel, outlookConnectedAt, "Conecte Gmail ou Outlook quando quiser ler Pix.");
     } else {
       dom.authPhoto.src = "";
       dom.authPhoto.hidden = false;
       dom.authName.textContent = "Usuário";
       dom.authEmail.textContent = "";
       dom.authPanel.classList.remove("is-authenticated");
-      dom.authStatus.textContent = isFirebaseConfigured() ? "Conecte o Gmail quando quiser ler Pix." : "Configure o Firebase para ativar o Gmail.";
+      dom.authStatus.textContent = isFirebaseConfigured() ? "Conecte Gmail ou Outlook quando quiser ler Pix." : "Configure o Firebase para ativar o Gmail.";
     }
 
     createIcons();
+  }
+
+  function buildEmailStatusText(gmailLabel, connectedAt, outlookLabel, outlookConnectedAt, fallback) {
+    if (state.gmailSessionExpired) return "Sessão do Gmail expirada. Conecte novamente.";
+    if (state.outlookSessionExpired) return "Sessão do Outlook expirada. Conecte novamente.";
+    const parts = [];
+    if (state.gmailConnected) parts.push(`Gmail${gmailLabel ? `: ${gmailLabel}` : ""}${connectedAt ? ` desde ${connectedAt}` : ""}`);
+    if (state.outlookConnected) parts.push(`Outlook${outlookLabel ? `: ${outlookLabel}` : ""}${outlookConnectedAt ? ` desde ${outlookConnectedAt}` : ""}`);
+    return parts.length ? `${parts.join(" | ")}.` : fallback;
   }
 
   function updateAccessControl() {
@@ -2182,12 +3053,13 @@
 
   function bootUserDashboard() {
     restoreGmailConnectionState();
+    restoreOutlookConnectionState();
 
     if (!isAdminUser()) {
       state.dataSource = "gmail";
       saveDataSourcePreference("gmail");
 
-      if (state.gmailPixTransactions.length || loadGmailSessionData()) {
+      if (state.gmailPixTransactions.length || state.outlookPixTransactions.length || loadGmailSessionData() || loadOutlookSessionData()) {
         applyGmailPixToDashboard({ silent: true });
       } else {
         showGmailEmptyState();
@@ -2197,10 +3069,10 @@
 
     state.dataSource = loadDataSourcePreference() || "api";
 
-    if (state.dataSource === "gmail") {
-      if (state.gmailPixTransactions.length || loadGmailSessionData()) {
+    if (state.dataSource === "gmail" || state.dataSource === "outlook") {
+      if (state.gmailPixTransactions.length || state.outlookPixTransactions.length || loadGmailSessionData() || loadOutlookSessionData()) {
         applyGmailPixToDashboard({ silent: true });
-      } else if (state.gmailConnected) {
+      } else if (state.gmailConnected || state.outlookConnected) {
         showGmailEmptyState();
       } else {
         state.dataSource = "api";
@@ -2223,7 +3095,8 @@
     if (!key) return;
 
     try {
-      window.localStorage.setItem(key, source === "gmail" ? "gmail" : "api");
+      const normalized = source === "outlook" ? "outlook" : source === "api" ? "api" : "gmail";
+      window.localStorage.setItem(key, normalized);
     } catch (error) {
       console.warn(`${FINANCEIRO_LOG_PREFIX} Não foi possível salvar preferência de fonte.`, error);
     }
@@ -2235,7 +3108,7 @@
 
     try {
       const source = window.localStorage.getItem(key);
-      return source === "gmail" || source === "api" ? source : "";
+      return source === "gmail" || source === "outlook" || source === "api" ? source : "";
     } catch (error) {
       return "";
     }
@@ -2246,14 +3119,16 @@
     state.data = createEmptyData(state.month, state.year);
     state.monthlySeries = [dataToMonthlyPoint(state.data)];
     state.dataLoaded = true;
-    state.connection = "Conecte seu Gmail para carregar seus dados.";
+    state.connection = "Conecte Gmail ou Outlook para carregar seus dados.";
     renderApp();
     renderAuthPanel();
-    setStatus("Conecte seu Gmail", "neutral");
-    dom.lastUpdated.textContent = "Conecte seu Gmail para carregar seus dados.";
+    setStatus("Conecte e-mail", "neutral");
+    dom.lastUpdated.textContent = "Conecte Gmail ou Outlook para carregar seus dados.";
     dom.authStatus.textContent = state.gmailConnected
       ? "Gmail conectado. Reconecte para atualizar os e-mails."
-      : "Conecte seu Gmail para carregar seus dados.";
+      : state.outlookConnected
+        ? "Outlook conectado. Reconecte para atualizar os e-mails."
+        : "Conecte Gmail ou Outlook para carregar seus dados.";
   }
 
   function renderAdmin() {
@@ -2283,7 +3158,12 @@
         </td>
         <td data-label="Status">
           <span class="tx-type ${user.blocked ? "saida" : "entrada"}">${user.blocked ? "Bloqueado" : "Ativo"}</span>
-          <small class="admin-gmail-status">${(state.userSettings && state.userSettings[normalizeEmail(user.email)] && state.userSettings[normalizeEmail(user.email)].gmailConnected) ? "Gmail conectado" : "Gmail desconectado"}</small>
+          <small class="admin-gmail-status">${(() => {
+            const settings = state.userSettings && state.userSettings[normalizeEmail(user.email)];
+            const gmail = settings && settings.gmailConnected ? "Gmail conectado" : "Gmail desconectado";
+            const outlook = settings && settings.outlookConnected ? "Outlook conectado" : "Outlook desconectado";
+            return `${gmail} | ${outlook}`;
+          })()}</small>
         </td>
         <td data-label="Ações">
           <button class="mini-action" type="button" data-admin-user-action="toggle-block">
@@ -2792,13 +3672,16 @@
     const term = normalizeForSearch(dom.nameSearch.value);
     const selectedCategory = dom.categoryFilter.value;
     const selectedType = dom.typeFilter.value;
+    const selectedOrigin = dom.originFilter ? dom.originFilter.value : "all";
 
     const rows = state.data.historico.filter((row) => {
-      const text = normalizeForSearch(`${row.nome} ${row.categoria} ${row.descricao}`);
+      const origin = row.origem || "api";
+      const text = normalizeForSearch(`${row.nome} ${row.categoria} ${row.descricao} ${origin}`);
       const matchesTerm = !term || text.includes(term);
       const matchesCategory = selectedCategory === "all" || row.categoria === selectedCategory;
       const matchesType = selectedType === "all" || row.tipo === selectedType;
-      return matchesTerm && matchesCategory && matchesType;
+      const matchesOrigin = selectedOrigin === "all" || origin === selectedOrigin;
+      return matchesTerm && matchesCategory && matchesType && matchesOrigin;
     });
 
     dom.historyCount.textContent = `${rows.length} movimentações`;
@@ -2809,15 +3692,26 @@
 
   function renderHistoryRow(row, index) {
     const sign = row.tipo === "entrada" ? "+" : "-";
+    const origin = row.origem || "api";
     return `
-      <tr class="clickable-row" data-history-index="${index}" tabindex="0" role="button">
+      <tr class="clickable-row" data-history-index="${index}" data-origin="${escapeAttribute(origin)}" tabindex="0" role="button">
         <td data-label="Tipo"><span class="tx-type ${row.tipo}">${row.tipo === "entrada" ? "Entrada" : "Saída"}</span></td>
         <td data-label="Data">${escapeHtml(row.data)}</td>
-        <td data-label="Nome" class="name-cell">${escapeHtml(row.nome)}</td>
+        <td data-label="Nome" class="name-cell">${escapeHtml(row.nome)}<small class="origin-badge">${escapeHtml(formatOriginLabel(origin))}</small></td>
         <td data-label="Categoria"><span class="tag">${escapeHtml(row.categoria)}</span></td>
         <td data-label="Valor" class="align-right amount ${row.tipo}">${sign} ${escapeHtml(formatCurrency(row.valor))}</td>
       </tr>
     `;
+  }
+
+  function formatOriginLabel(origin) {
+    const labels = {
+      gmail: "Gmail",
+      outlook: "Outlook",
+      api: "API admin",
+      venda_manual: "Venda manual"
+    };
+    return labels[origin] || "Origem";
   }
 
   function renderCategoryFilters() {
@@ -2883,6 +3777,7 @@
     const labels = Array.from({ length: days }, (_, index) => pad(index + 1));
     const receitas = labels.map((day) => grouped.receitas[day] || 0);
     const despesas = labels.map((day) => grouped.despesas[day] || 0);
+    const isMobile = window.matchMedia("(max-width: 640px)").matches;
 
     replaceChart("cashflow", dom.cashflowChart, {
       type: "line",
@@ -2896,7 +3791,7 @@
             backgroundColor: "rgba(41, 212, 122, 0.14)",
             fill: true,
             tension: 0.36,
-            pointRadius: 2,
+            pointRadius: isMobile ? 0 : 2,
             pointHoverRadius: 5
           },
           {
@@ -2906,7 +3801,7 @@
             backgroundColor: "rgba(255, 92, 106, 0.12)",
             fill: true,
             tension: 0.36,
-            pointRadius: 2,
+            pointRadius: isMobile ? 0 : 2,
             pointHoverRadius: 5
           }
         ]
@@ -2919,6 +3814,7 @@
     const categories = getCategoryTotals();
     const labels = categories.length ? categories.map((category) => category.name) : ["Sem gastos"];
     const values = categories.length ? categories.map((category) => category.total) : [1];
+    const isMobile = window.matchMedia("(max-width: 640px)").matches;
 
     replaceChart("category", dom.categoryChart, {
       type: "doughnut",
@@ -2940,6 +3836,7 @@
         cutout: "68%",
         plugins: {
           legend: {
+            display: !isMobile,
             position: "bottom",
             labels: {
               color: "#b7c6c7",
@@ -3009,15 +3906,20 @@
   }
 
   function chartOptions() {
+    const isMobile = window.matchMedia("(max-width: 640px)").matches;
     return {
       responsive: true,
       maintainAspectRatio: false,
+      animation: {
+        duration: isMobile ? 180 : 420
+      },
       interaction: {
         intersect: false,
         mode: "index"
       },
       plugins: {
         legend: {
+          display: !isMobile,
           labels: {
             color: "#b7c6c7",
             usePointStyle: true,
@@ -3041,7 +3943,8 @@
           },
           ticks: {
             color: "#8c9ea4",
-            maxRotation: 0
+            maxRotation: 0,
+            maxTicksLimit: isMobile ? 6 : 12
           }
         },
         y: {
@@ -3051,6 +3954,7 @@
           },
           ticks: {
             color: "#8c9ea4",
+            maxTicksLimit: isMobile ? 4 : 8,
             callback: (value) => formatCompactCurrency(value)
           }
         }
@@ -3152,6 +4056,9 @@
       metas: "Metas",
       onboarding: "Primeiros passos",
       planos: "Planos",
+      ajuda: "Ajuda",
+      faq: "FAQ",
+      sobre: "Sobre",
       configuracoes: "Configurações",
       admin: "Admin"
     };
@@ -3160,6 +4067,7 @@
 
   function setLoading(isLoading, title, text) {
     dom.loadingOverlay.hidden = !isLoading;
+    document.body.classList.toggle("is-loading", Boolean(isLoading));
     dom.refreshButton.disabled = isLoading;
     if (title) dom.loadingTitle.textContent = title;
     if (text) dom.loadingText.textContent = text;
@@ -3176,7 +4084,8 @@
   function showToast(message, type) {
     window.clearTimeout(showToast.timer);
     dom.toast.textContent = message;
-    dom.toast.classList.toggle("error", type === "error");
+    dom.toast.classList.remove("error", "success", "warning");
+    if (type) dom.toast.classList.add(type);
     dom.toast.hidden = false;
     showToast.timer = window.setTimeout(() => {
       dom.toast.hidden = true;
@@ -3418,6 +4327,7 @@
       origem: transaction.origem || readField(raw, ["origem"]),
       banco: transaction.banco || readField(raw, ["banco", "instituicao"]),
       gmailMessageId: transaction.gmailMessageId || transaction.emailId || readField(raw, ["gmailMessageId", "emailId"]),
+      outlookMessageId: transaction.outlookMessageId || readField(raw, ["outlookMessageId"]),
       observacoes: transaction.observacao || readField(raw, ["observacoes", "observacao", "obs"]),
       origemPix: transaction.tipo === "entrada" ? transaction.nome : readField(raw, ["origem", "origemPix", "contaOrigem"]),
       destinoPix: transaction.tipo === "saida" ? transaction.destino : readField(raw, ["destino", "destinoPix", "contaDestino"]),
@@ -3438,6 +4348,7 @@
       createDetailField(flat, usedKeys, "Hora", ["hora", "horario", "horaPagamento", "horaTransacao"], dateTime.time),
       createDetailField(flat, usedKeys, "ID da transação", ["idTransacao", "id_transacao", "transactionId", "endToEndId", "e2eId", "codigoTransacao"]),
       createDetailField(flat, usedKeys, "ID Gmail", ["gmailMessageId", "emailId"]),
+      createDetailField(flat, usedKeys, "ID Outlook", ["outlookMessageId"]),
       createDetailField(flat, usedKeys, "Status", ["status", "situacao", "estado"]),
       createDetailField(flat, usedKeys, "Descrição", ["descricao", "descrição", "description", "historico"], transaction.descricao),
       createDetailField(flat, usedKeys, "Categoria", ["categoria", "category"], transaction.categoria),
@@ -3484,10 +4395,18 @@
       saveGmailSessionData(state.gmailPixTransactions);
       saveTransactionsToFirestore(state.gmailPixTransactions);
       if (state.dataSource === "gmail") applyGmailPixToDashboard({ silent: true });
+    } else if (transaction.origem === "outlook" || transaction.outlookMessageId) {
+      state.outlookPixTransactions = state.outlookPixTransactions.map((item) => {
+        const same = (item.outlookMessageId || item.emailId || item.id) === (transaction.outlookMessageId || transaction.emailId || transaction.id);
+        return same ? { ...item, categoria: nextCategory } : item;
+      });
+      saveOutlookSessionData(state.outlookPixTransactions);
+      saveTransactionsToFirestore(state.outlookPixTransactions);
+      if (state.dataSource === "outlook" || state.dataSource === "gmail") applyGmailPixToDashboard({ silent: true });
     }
 
     const updateCategory = (item) => {
-      if ((transaction.id && item.id === transaction.id) || (transaction.gmailMessageId && (item.gmailMessageId === transaction.gmailMessageId || item.emailId === transaction.gmailMessageId))) {
+      if ((transaction.id && item.id === transaction.id) || (transaction.gmailMessageId && (item.gmailMessageId === transaction.gmailMessageId || item.emailId === transaction.gmailMessageId)) || (transaction.outlookMessageId && item.outlookMessageId === transaction.outlookMessageId)) {
         item.categoria = nextCategory;
       }
     };
@@ -3845,7 +4764,17 @@
   }
 
   function emptyRow(columns) {
-    return `<tr><td class="empty-row" colspan="${columns}">Nenhum registro encontrado</td></tr>`;
+    return `
+      <tr>
+        <td class="empty-row" colspan="${columns}">
+          <div class="empty-state-mini">
+            <i data-lucide="inbox"></i>
+            <strong>Nenhum registro encontrado</strong>
+            <span>Conecte Gmail/Outlook, ajuste os filtros ou lance uma venda manual.</span>
+          </div>
+        </td>
+      </tr>
+    `;
   }
 
   function sumValues(rows) {
@@ -4006,11 +4935,14 @@
     const profileSettingsForm = document.getElementById("profileSettingsForm");
     const settingsConnectGmailButton = document.getElementById("settingsConnectGmailButton");
     const disconnectGmailButton = document.getElementById("disconnectGmailButton");
+    const disconnectOutlookButton = document.getElementById("disconnectOutlookButton");
     const clearLocalDataButton = document.getElementById("clearLocalDataButton");
     const connectOutlookButton = document.getElementById("connectOutlookButton");
     const settingsOutlookButton = document.getElementById("settingsOutlookButton");
     const recentTable = document.getElementById("recentTable");
     const historyTable = document.getElementById("historyTable");
+    const sourceCardGrid = document.getElementById("sourceCardGrid");
+    const saleFabButton = document.getElementById("saleFabButton");
 
     if (landingLoginButton) landingLoginButton.addEventListener("click", openAccessLogin);
     if (landingInviteButton) landingInviteButton.addEventListener("click", openAccessLogin);
@@ -4044,11 +4976,14 @@
     if (profileSettingsForm) profileSettingsForm.addEventListener("submit", handleProfileSettingsSubmit);
     if (settingsConnectGmailButton) settingsConnectGmailButton.addEventListener("click", connectGmailAndSearchPix);
     if (disconnectGmailButton) disconnectGmailButton.addEventListener("click", disconnectGmailFromSettings);
+    if (disconnectOutlookButton) disconnectOutlookButton.addEventListener("click", disconnectOutlook);
     if (clearLocalDataButton) clearLocalDataButton.addEventListener("click", clearLocalDataFromSettings);
-    if (connectOutlookButton) connectOutlookButton.addEventListener("click", () => outlookAuth("sidebar"));
-    if (settingsOutlookButton) settingsOutlookButton.addEventListener("click", () => outlookAuth("settings"));
+    if (connectOutlookButton) connectOutlookButton.addEventListener("click", connectOutlook);
+    if (settingsOutlookButton) settingsOutlookButton.addEventListener("click", connectOutlook);
     if (recentTable) recentTable.addEventListener("click", (event) => handleHistoryDetailsClick(event, "recent"));
     if (historyTable) historyTable.addEventListener("click", (event) => handleHistoryDetailsClick(event, "history"));
+    if (sourceCardGrid) sourceCardGrid.addEventListener("click", handleSourceHubClick);
+    if (saleFabButton) saleFabButton.addEventListener("click", openSaleLauncher);
 
     document.querySelectorAll("[data-mobile-section]").forEach((button) => {
       button.addEventListener("click", () => setActiveSection(button.dataset.mobileSection));
@@ -4141,6 +5076,7 @@
   }
 
   function renderGrowthFeatures() {
+    renderSourceHub();
     renderSales();
     renderAiAnalysis();
     renderReports();
@@ -4177,6 +5113,7 @@
     state.manualSales = loadSalesFromLocal(state.systemUser.email);
     state.allSales = isAdminUser() ? loadAllSalesFromLocal() : state.manualSales.slice();
     state.appSettings = loadSettingsFromLocal(state.systemUser.email);
+    applyEmailConnectionSettings(state.appSettings);
     state.userSettings = isAdminUser() ? loadAllSettingsFromLocal() : { [normalizeEmail(state.systemUser.email)]: state.appSettings };
     applyAppSettings();
 
@@ -4372,6 +5309,7 @@
       if (doc.exists) {
         state.appSettings = normalizeAppSettings({ ...doc.data(), email: state.systemUser.email });
         saveSettingsToLocal(state.appSettings);
+        applyEmailConnectionSettings(state.appSettings);
         applyAppSettings();
       } else {
         await saveSettingsToFirestore(state.appSettings || normalizeAppSettings({ email: state.systemUser.email }));
@@ -4557,7 +5495,7 @@
     const nome = raw.nome || raw.remetente || raw.quemEnviou || raw.destino || raw.descricao || "Transação Pix";
 
     return {
-      id: raw.id || raw.gmailMessageId || raw.emailId || raw.hash || "",
+      id: raw.id || raw.gmailMessageId || raw.outlookMessageId || raw.messageId || raw.emailId || raw.hash || "",
       tipo: type,
       data: raw.data || raw.date || "",
       nome: safeGrowthText(nome, "Transação Pix"),
@@ -4567,6 +5505,9 @@
       origem: safeGrowthText(raw.origem, type === "recebido" ? "api" : "api"),
       banco: safeGrowthText(raw.banco, ""),
       gmailMessageId: safeGrowthText(raw.gmailMessageId || raw.emailId, ""),
+      outlookMessageId: safeGrowthText(raw.outlookMessageId, ""),
+      messageId: safeGrowthText(raw.messageId || raw.gmailMessageId || raw.outlookMessageId || raw.emailId, ""),
+      emailOrigem: safeGrowthText(raw.emailOrigem || raw.from, ""),
       hash: safeGrowthText(raw.hash, ""),
       observacao: safeGrowthText(raw.observacao || raw.observação, ""),
       ownerEmail: safeGrowthText(raw.ownerEmail, ""),
@@ -4617,6 +5558,91 @@
       topCategory,
       categoryMap
     };
+  }
+
+  function renderSourceHub() {
+    const grid = document.getElementById("sourceCardGrid");
+    if (!grid) return;
+
+    const cards = [
+      {
+        id: "gmail",
+        icon: "mail-check",
+        title: "Gmail",
+        text: state.gmailConnected ? `Conectado${state.gmailEmail ? `: ${state.gmailEmail}` : ""}` : "Leia e-mails de Pix do Gmail.",
+        meta: formatSourceSyncMeta("gmail"),
+        status: state.gmailSessionExpired ? "Reconectar Gmail" : state.gmailConnected && state.gmailAccessToken ? "Atualizar Gmail" : state.gmailConnected ? "Reconectar Gmail" : "Conectar Gmail",
+        action: state.gmailConnected && state.gmailAccessToken ? "sync-gmail" : "connect-gmail",
+        active: state.gmailConnected,
+        disabled: false
+      },
+      {
+        id: "outlook",
+        icon: "mail-plus",
+        title: "Outlook/Hotmail",
+        text: state.outlookConnected ? `Conectado${state.outlookEmail ? `: ${state.outlookEmail}` : ""}` : "Leia e-mails de Pix pelo Microsoft Graph.",
+        meta: formatSourceSyncMeta("outlook"),
+        status: state.outlookSessionExpired ? "Reconectar Outlook" : state.outlookConnected && state.outlookAccessToken ? "Atualizar Outlook" : state.outlookConnected ? "Reconectar Outlook" : "Conectar Outlook",
+        action: state.outlookConnected && state.outlookAccessToken ? "sync-outlook" : "connect-outlook",
+        active: state.outlookConnected,
+        disabled: false
+      },
+      {
+        id: "sales",
+        icon: "shopping-bag",
+        title: "Vendas manuais",
+        text: "Lance receitas que não chegaram por e-mail.",
+        status: "Lançar venda",
+        meta: `${getSalesForCurrentPeriod().length} vendas no periodo`,
+        action: "open-sales",
+        active: state.manualSales.length > 0,
+        disabled: false
+      },
+      {
+        id: "api",
+        icon: "database",
+        title: "API admin",
+        text: "Dados antigos do Apps Script, restritos ao admin.",
+        status: isAdminUser() ? "Usar API" : "Admin",
+        meta: isAdminUser() ? "Disponivel apenas para admin" : "Bloqueada para usuario comum",
+        action: "use-api",
+        active: state.dataSource === "api",
+        disabled: !isAdminUser(),
+        hidden: !isAdminUser()
+      }
+    ].filter((card) => !card.hidden);
+
+    grid.innerHTML = cards.map((card) => `
+      <button class="source-card ${card.active ? "active" : ""}" type="button" data-source-action="${card.action}" ${card.disabled ? "disabled" : ""}>
+        <span class="source-card-icon"><i data-lucide="${card.icon}"></i></span>
+        <strong>${escapeGrowthHtml(card.title)}</strong>
+        <small>${escapeGrowthHtml(card.text)}</small>
+        <span class="source-card-meta">${escapeGrowthHtml(card.meta || "")}</span>
+        <em>${escapeGrowthHtml(card.status)}</em>
+      </button>
+    `).join("");
+  }
+
+  function formatSourceSyncMeta(source) {
+    const prefix = source === "outlook" ? "outlook" : "gmail";
+    const lastSyncAt = state[`${prefix}LastSyncAt`] || "";
+    const emailsFound = Number(state[`${prefix}LastEmailsFound`]) || 0;
+    const pixFound = Number(state[`${prefix}LastPixFound`]) || 0;
+    const syncText = lastSyncAt ? formatDateTime(new Date(lastSyncAt)) : "sem sincronizacao";
+    return `Ultima: ${syncText} | E-mails: ${emailsFound} | Pix: ${pixFound}`;
+  }
+
+  function handleSourceHubClick(event) {
+    const button = event.target.closest("[data-source-action]");
+    if (!button || button.disabled) return;
+
+    const action = button.dataset.sourceAction;
+    if (action === "connect-gmail") return connectGmailAndSearchPix();
+    if (action === "sync-gmail") return searchPixInConnectedGmail(true);
+    if (action === "connect-outlook") return connectOutlook();
+    if (action === "sync-outlook") return syncOutlookEmails(true);
+    if (action === "open-sales") return openSaleLauncher();
+    if (action === "use-api") return setDataSource("api");
   }
 
   function renderSales() {
@@ -4703,6 +5729,14 @@
     renderApp();
     addSystemLog(id ? "venda editada" : "venda criada", `${sale.cliente} - ${formatGrowthCurrency(sale.valor)}`);
     showToast(id ? "Venda atualizada." : "Venda lançada como receita.");
+  }
+
+  function openSaleLauncher() {
+    setActiveSection("vendas");
+    window.setTimeout(() => {
+      const input = document.getElementById("saleClientInput");
+      if (input) input.focus();
+    }, 120);
   }
 
   function handleSalesTableClick(event) {
@@ -4901,9 +5935,41 @@
       gmailConnected: Boolean(settings && settings.gmailConnected),
       gmailEmail: safeGrowthText(settings && settings.gmailEmail, state.gmailEmail || ""),
       gmailConnectedAt: safeGrowthText(settings && settings.gmailConnectedAt, state.gmailConnectedAt || ""),
+      gmailLastSyncAt: safeGrowthText(settings && settings.gmailLastSyncAt, state.gmailLastSyncAt || ""),
+      gmailLastEmailsFound: Number(settings && settings.gmailLastEmailsFound) || Number(state.gmailLastEmailsFound) || 0,
+      gmailLastPixFound: Number(settings && settings.gmailLastPixFound) || Number(state.gmailLastPixFound) || 0,
+      outlookConnected: Boolean(settings && settings.outlookConnected),
+      outlookEmail: safeGrowthText(settings && settings.outlookEmail, state.outlookEmail || ""),
+      outlookConnectedAt: safeGrowthText(settings && settings.outlookConnectedAt, state.outlookConnectedAt || ""),
+      outlookLastSyncAt: safeGrowthText(settings && settings.outlookLastSyncAt, state.outlookLastSyncAt || ""),
+      outlookLastEmailsFound: Number(settings && settings.outlookLastEmailsFound) || Number(state.outlookLastEmailsFound) || 0,
+      outlookLastPixFound: Number(settings && settings.outlookLastPixFound) || Number(state.outlookLastPixFound) || 0,
       blocked: Boolean(settings && settings.blocked),
       updatedAt: safeGrowthText(settings && settings.updatedAt, new Date().toISOString())
     };
+  }
+
+  function applyEmailConnectionSettings(settings) {
+    if (!settings) return;
+
+    if (settings.gmailConnected && settings.gmailEmail) {
+      state.gmailConnected = true;
+      state.gmailEmail = settings.gmailEmail;
+      state.gmailConnectedAt = settings.gmailConnectedAt || state.gmailConnectedAt;
+      state.gmailLastSyncAt = settings.gmailLastSyncAt || state.gmailLastSyncAt || "";
+      state.gmailLastEmailsFound = Number(settings.gmailLastEmailsFound) || Number(state.gmailLastEmailsFound) || 0;
+      state.gmailLastPixFound = Number(settings.gmailLastPixFound) || Number(state.gmailLastPixFound) || 0;
+    }
+
+    if (settings.outlookConnected && settings.outlookEmail) {
+      state.outlookConnected = true;
+      state.outlookEmail = settings.outlookEmail;
+      state.outlookConnectedAt = settings.outlookConnectedAt || state.outlookConnectedAt;
+      state.outlookLastSyncAt = settings.outlookLastSyncAt || state.outlookLastSyncAt || "";
+      state.outlookLastEmailsFound = Number(settings.outlookLastEmailsFound) || Number(state.outlookLastEmailsFound) || 0;
+      state.outlookLastPixFound = Number(settings.outlookLastPixFound) || Number(state.outlookLastPixFound) || 0;
+      state.outlookSessionExpired = !state.outlookAccessToken;
+    }
   }
 
   function applyAppSettings() {
@@ -4943,6 +6009,9 @@
       gmailConnected: state.gmailConnected,
       gmailEmail: state.gmailEmail,
       gmailConnectedAt: state.gmailConnectedAt,
+      outlookConnected: state.outlookConnected,
+      outlookEmail: state.outlookEmail,
+      outlookConnectedAt: state.outlookConnectedAt,
       updatedAt: new Date().toISOString()
     });
     saveSettingsToLocal(state.appSettings);
@@ -4959,8 +6028,16 @@
   function renderSettingsExtras() {
     const status = document.getElementById("settingsGmailStatus");
     const email = document.getElementById("settingsGmailEmail");
-    if (status) status.textContent = state.gmailConnected ? "Conectado" : "Desconectado";
+    const outlookStatus = document.getElementById("settingsOutlookStatus");
+    const outlookEmail = document.getElementById("settingsOutlookEmail");
+    if (status) status.textContent = state.gmailConnected ? "Gmail conectado" : "Gmail desconectado";
     if (email) email.textContent = state.gmailEmail || "--";
+    if (outlookStatus) outlookStatus.textContent = state.outlookSessionExpired
+      ? "Reconectar Outlook"
+      : state.outlookConnected
+        ? "Outlook conectado"
+        : "Outlook desconectado";
+    if (outlookEmail) outlookEmail.textContent = state.outlookEmail || "--";
     applyAppSettings();
   }
 
@@ -5125,10 +6202,13 @@
 
     buttons.forEach((button) => {
       button.hidden = !state.accessGranted && button.id === "connectOutlookButton";
-      button.classList.add("is-disabled");
+      button.classList.toggle("is-disabled", !isMicrosoftConfigured());
+      button.disabled = !isMicrosoftConfigured() || state.outlookFetchInProgress;
       const label = button.querySelector("span");
-      if (label) label.textContent = "Outlook/Hotmail Beta";
-      button.title = "Em breve: integração via Microsoft Graph API.";
+      if (label) label.textContent = state.outlookSessionExpired ? "Reconectar Outlook" : state.outlookConnected && state.outlookAccessToken ? "Atualizar Outlook" : state.outlookConnected ? "Reconectar Outlook" : "Conectar Outlook";
+      button.title = isMicrosoftConfigured()
+        ? "Conectar Outlook/Hotmail via Microsoft Graph."
+        : "Configure MICROSOFT_CLIENT_ID no Azure/Microsoft Entra.";
     });
   }
 
@@ -5148,28 +6228,16 @@
       button.classList.toggle("active", section === activeSection);
       button.disabled = section === "admin" && !isAdminUser();
     });
-  }
 
-  // Futuro: implementar OAuth Microsoft com Microsoft Graph API para ler e-mails Outlook/Hotmail.
-  function outlookAuth(source = "manual") {
-    if (source !== "init") {
-      console.warn(`${FINANCEIRO_LOG_PREFIX} Outlook/Hotmail ainda não implementado. Futuramente usar Microsoft Graph API.`, { source });
-      showToast("Outlook/Hotmail está em beta. Integração futura via Microsoft Graph API.");
+    const saleFab = document.getElementById("saleFabButton");
+    if (saleFab) {
+      saleFab.hidden = !hasAccess || activeSection === "vendas";
     }
-    return {
-      status: "beta",
-      provider: "microsoft-graph"
-    };
   }
 
-  async function syncOutlookEmails() {
-    console.warn(`${FINANCEIRO_LOG_PREFIX} syncOutlookEmails é um stub. Microsoft Graph API será necessária no futuro.`);
-    return [];
-  }
-
-  function parseOutlookPixEmail(email) {
-    console.warn(`${FINANCEIRO_LOG_PREFIX} parseOutlookPixEmail é um stub beta.`, { subject: email && email.subject });
-    return null;
+  function outlookAuth(source = "manual") {
+    if (source !== "init") return connectOutlook();
+    return { status: isMicrosoftConfigured() ? "ready" : "missing-client-id", provider: "microsoft-graph" };
   }
 
   function renderReports() {
@@ -5316,12 +6384,13 @@
     if (!list) return;
 
     const items = [
-      "functions/.env fora do projeto e do git",
-      "Usuário comum não vê modo API",
-      "Layout responsivo mobile conferido",
-      "Console sem erros críticos",
-      "Compatível com Vercel/hosting estático",
-      "Checklist de Gmail, convites e backup testado"
+      ".env/functions/.env protegidos no .gitignore",
+      isAdminUser() ? "Admin consegue acessar API antiga" : "Usuário comum não vê modo API",
+      "Layout mobile sem overflow horizontal",
+      isMicrosoftConfigured() ? "Microsoft Client ID configurado" : "Configurar MICROSOFT_CLIENT_ID no Azure",
+      "Domínio Vercel autorizado no Firebase Authentication",
+      "Firestore com fallback localStorage ativo",
+      "Gmail, Outlook, convites, vendas e backup testados"
     ];
 
     list.innerHTML = items.map((item) => `
@@ -5459,6 +6528,7 @@
       settings: state.appSettings || loadSettingsFromLocal(),
       sales: getVisibleSales(),
       gmailTransactions: state.gmailPixTransactions || [],
+      outlookTransactions: state.outlookPixTransactions || [],
       currentTransactions: getActiveTransactions(),
       logs: loadSystemLogs()
     };
@@ -5502,6 +6572,14 @@
           state.dataSource = "gmail";
           saveGmailSessionData(state.gmailPixTransactions);
           saveTransactionsToFirestore(state.gmailPixTransactions);
+          applyGmailPixToDashboard({ silent: true });
+        }
+
+        if (Array.isArray(backup.outlookTransactions) && backup.outlookTransactions.length) {
+          state.outlookPixTransactions = backup.outlookTransactions.map((transaction) => ({ ...transaction, origem: "outlook" }));
+          state.dataSource = "outlook";
+          saveOutlookSessionData(state.outlookPixTransactions);
+          saveTransactionsToFirestore(state.outlookPixTransactions);
           applyGmailPixToDashboard({ silent: true });
         }
 

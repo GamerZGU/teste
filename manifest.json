@@ -1,7 +1,7 @@
 {
   "name": "Financeiro Automático",
   "short_name": "Financeiro",
-  "description": "Controle seus Pix automaticamente pelo Gmail.",
+  "description": "Controle seus Pix automaticamente pelo Gmail e Outlook.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
